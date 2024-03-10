@@ -8,7 +8,8 @@ pub enum TokenKind {
     LeftParen,
     RightParen,
     Eof,
-    Bad
+    Bad,
+    Whitespace
 }
 
 #[derive(Debug)]
@@ -69,6 +70,9 @@ impl<'a> Lexer<'a> {
             if Self::is_number_start(&c) {
                 let number: i64 = self.consume_number();
                 kind = TokenKind::Number(number)
+            } else if Self::is_whitespace(&c) {
+                self.consume();
+                kind = TokenKind::Whitespace
             } else {
                 kind = self.consume_punctuation();
             }
@@ -80,17 +84,8 @@ impl<'a> Lexer<'a> {
         }) // return Option<Token>
     }
 
-    fn consume_punctuation(&mut self) -> TokenKind {
-        let c = self.consume().unwrap();
-        match c {
-            '+' => TokenKind::Plus,
-            '-' => TokenKind::Minus,
-            '*' => TokenKind::Asterisk,
-            '/' => TokenKind::Slash,
-            '(' => TokenKind::LeftParen,
-            ')' => TokenKind::RightParen,
-            _ => TokenKind::Bad
-        }
+    fn is_whitespace(c: &char) -> bool {
+        c.is_whitespace() // return bool
     }
 
     fn is_number_start(c: &char) -> bool {
@@ -121,5 +116,18 @@ impl<'a> Lexer<'a> {
             }
         }
         number // return i64
+    }
+
+    fn consume_punctuation(&mut self) -> TokenKind {
+        let c = self.consume().unwrap();
+        match c {
+            '+' => TokenKind::Plus,
+            '-' => TokenKind::Minus,
+            '*' => TokenKind::Asterisk,
+            '/' => TokenKind::Slash,
+            '(' => TokenKind::LeftParen,
+            ')' => TokenKind::RightParen,
+            _ => TokenKind::Bad
+        }
     }
 }
