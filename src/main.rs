@@ -12,7 +12,7 @@ fn main() {
     }
     println!("{:?}", tokens);
     let mut ast = Ast::new();
-    let mut parser = Parser::new(tokens, 0);
+    let mut parser = Parser::new(tokens);
     while let Some(stmt) = parser.next_statement() {
         ast.add_statement(stmt);
     }

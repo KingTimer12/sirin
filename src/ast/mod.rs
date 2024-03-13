@@ -1,3 +1,5 @@
+use self::lexer::Token;
+
 pub mod lexer;
 pub mod parser;
 
@@ -42,11 +44,18 @@ pub trait ASTVisitor {
         match &expr.kind {
             ASTExpressionKind::Number(number) => {
                 self.visit_number(number);
+            },
+            ASTExpressionKind::Binary(expr) => {
+                self.visit_binary_expression(expr);
             }
         }
     }
     fn visit_expression(&mut self, expr: &ASTExpression) {
         self.do_visit_expression(expr)
+    }
+    fn visit_binary_expression(&mut self, binary_expr: &ASTBinaryExpression) {
+        self.visit_expression(&binary_expr.left);
+        self.visit_expression(&binary_expr.right)
     }
     fn visit_number(&mut self, number: &ASTNumberExpression);
 }
@@ -65,14 +74,14 @@ const INCREMENT_INDENT_VALUE: usize = 2;
 
 impl ASTVisitor for ASTPrinter {
     fn visit_statement(&mut self, stmt: &ASTStatement) {
-        self.print_with_indent("Statement: ");
+        self.print_with_indent("Statement:");
         self.indent += INCREMENT_INDENT_VALUE;
         ASTVisitor::do_visit_statement(self, stmt);
         self.indent -= INCREMENT_INDENT_VALUE
     }
 
     fn visit_expression(&mut self, expr: &ASTExpression) {
-        self.print_with_indent("Expression: ");
+        self.print_with_indent("Expression:");
         self.indent += INCREMENT_INDENT_VALUE;
         ASTVisitor::do_visit_expression(self, expr);
         self.indent -= INCREMENT_INDENT_VALUE
@@ -81,11 +90,57 @@ impl ASTVisitor for ASTPrinter {
     fn visit_number(&mut self, number: &ASTNumberExpression) {
         self.print_with_indent(&format!("Number: {}", number.number))
     }
+
+    fn visit_binary_expression(&mut self, binary_expr: &ASTBinaryExpression) {
+        self.print_with_indent("Binary Expression:");
+        self.indent += INCREMENT_INDENT_VALUE;
+        self.print_with_indent(&format!("Operator: {:?}", binary_expr.operator.kind));
+        self.visit_expression(&binary_expr.left);
+        self.visit_expression(&binary_expr.right);
+        self.indent -= INCREMENT_INDENT_VALUE;
+    }
 }
 
 pub enum ASTExpressionKind {
     Number(ASTNumberExpression),
+    Binary(ASTBinaryExpression)
 }
+
+// Binary
+
+#[derive(Debug)]
+pub enum ASTBinaryOperatorKind {
+    Add, Subtract, Multiply, Divide
+}
+
+#[derive(Debug)]
+pub struct ASTBinaryOperator {
+    kind: ASTBinaryOperatorKind,
+    token: Token
+}
+
+impl ASTBinaryOperator {
+    pub fn new(kind: ASTBinaryOperatorKind, token: Token) -> Self {
+        Self { kind, token }
+    }
+
+    pub fn precedence(&self) -> u8 {
+        match self.kind {
+            ASTBinaryOperatorKind::Add => 1,
+            ASTBinaryOperatorKind::Subtract => 1,
+            ASTBinaryOperatorKind::Multiply => 2,
+            ASTBinaryOperatorKind::Divide => 2
+        }
+    }
+}
+
+pub struct ASTBinaryExpression {
+    left: Box<ASTExpression>,
+    right: Box<ASTExpression>,
+    operator: ASTBinaryOperator
+}
+
+// Number
 
 pub struct ASTNumberExpression {
     number: i64
@@ -102,6 +157,10 @@ impl ASTExpression {
 
     pub fn number(number: i64) -> Self {
         Self::new(ASTExpressionKind::Number(ASTNumberExpression { number }))
+    }
+
+    pub fn binary(operator: ASTBinaryOperator, left: ASTExpression, right: ASTExpression) -> Self {
+        Self::new(ASTExpressionKind::Binary(ASTBinaryExpression { left: Box::new(left), right: Box::new(right), operator }))
     }
 }
 
