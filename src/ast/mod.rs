@@ -2,6 +2,7 @@ use self::lexer::Token;
 
 pub mod lexer;
 pub mod parser;
+pub mod evaluator;
 
 pub struct Ast {
     pub statements: Vec<ASTStatement>
@@ -40,6 +41,8 @@ pub trait ASTVisitor {
     fn visit_statement(&mut self, stmt: &ASTStatement) {
         self.do_visit_statement(stmt)
     }
+
+    // Expression
     fn do_visit_expression(&mut self, expr: &ASTExpression) {
         match &expr.kind {
             ASTExpressionKind::Number(number) => {
@@ -47,16 +50,29 @@ pub trait ASTVisitor {
             },
             ASTExpressionKind::Binary(expr) => {
                 self.visit_binary_expression(expr);
+            },
+            ASTExpressionKind::Parenthesized(expr) => {
+                self.visit_parenthesized_expression(expr);
             }
         }
     }
+
+    // Generic Expression
     fn visit_expression(&mut self, expr: &ASTExpression) {
         self.do_visit_expression(expr)
     }
+
+    // Binary Case
     fn visit_binary_expression(&mut self, binary_expr: &ASTBinaryExpression) {
         self.visit_expression(&binary_expr.left);
         self.visit_expression(&binary_expr.right)
     }
+
+    // Parenthesized Expression
+    fn visit_parenthesized_expression(&mut self, expr: &ASTParenthesizedExpression) {
+        self.do_visit_expression(&expr.expression)
+    }
+
     fn visit_number(&mut self, number: &ASTNumberExpression);
 }
 
@@ -99,11 +115,19 @@ impl ASTVisitor for ASTPrinter {
         self.visit_expression(&binary_expr.right);
         self.indent -= INCREMENT_INDENT_VALUE;
     }
+
+    fn visit_parenthesized_expression(&mut self, expr: &ASTParenthesizedExpression) {
+        self.print_with_indent("Parenthesized Expression:");
+        self.indent += INCREMENT_INDENT_VALUE;
+        self.visit_expression(&expr.expression);
+        self.indent -= INCREMENT_INDENT_VALUE;
+    }
 }
 
 pub enum ASTExpressionKind {
     Number(ASTNumberExpression),
-    Binary(ASTBinaryExpression)
+    Binary(ASTBinaryExpression),
+    Parenthesized(ASTParenthesizedExpression)
 }
 
 // Binary
@@ -146,6 +170,12 @@ pub struct ASTNumberExpression {
     number: i64
 }
 
+// Parenthesized
+
+pub struct ASTParenthesizedExpression {
+    expression: Box<ASTExpression>
+}
+
 pub struct ASTExpression {
     kind: ASTExpressionKind
 }
@@ -161,6 +191,10 @@ impl ASTExpression {
 
     pub fn binary(operator: ASTBinaryOperator, left: ASTExpression, right: ASTExpression) -> Self {
         Self::new(ASTExpressionKind::Binary(ASTBinaryExpression { left: Box::new(left), right: Box::new(right), operator }))
+    }
+
+    pub fn parenthesized(expr: ASTExpression) -> Self {
+        Self::new(ASTExpressionKind::Parenthesized(ASTParenthesizedExpression { expression: Box::new(expr) }))
     }
 }
 

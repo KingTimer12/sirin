@@ -1,9 +1,9 @@
-use crate::ast::{lexer::Lexer, parser::Parser, Ast};
+use crate::ast::{evaluator::ASTEvaluator, lexer::Lexer, parser::Parser, Ast};
 
 mod ast;
 
 fn main() {
-    let input = "2 + 2 * 2";
+    let input = "(800 + 1000000 * 90000000000 / 5) * 0";
 
     let mut lexer = Lexer::new(input);
     let mut tokens = Vec::new();
@@ -16,5 +16,8 @@ fn main() {
     while let Some(stmt) = parser.next_statement() {
         ast.add_statement(stmt);
     }
-    ast.visualize()
+    ast.visualize();
+    let mut eval = ASTEvaluator::new();
+    ast.visit(&mut eval);
+    println!("{:?}", eval.last_value);
 }

@@ -34,26 +34,29 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Option<ASTExpression> {
-        self.parse_binary_expression(0)
+        self.parse_binary_expression(0) // return Option<ASTExpression>
     }
     
     fn parse_binary_expression(&mut self, precedence: u8) -> Option<ASTExpression> {
         let mut left = self.parse_primary_expression()?;
 
         while let Some(operator) = self.parse_operator() {
+            self.consume();
             let operator_precedence = operator.precedence();
-            if operator_precedence <= precedence {
+            if operator_precedence < precedence {
                 break;
             }
             let right = self.parse_binary_expression(operator_precedence)?;
             left = ASTExpression::binary(operator, left, right)
         }
 
-        Some(left)
+        Some(left) // return Option<ASTExpression>
     }
 
+    // Operator Expression
+
     fn parse_operator(&mut self) -> Option<ASTBinaryOperator> {
-        let token = self.consume()?;
+        let token = self.current()?;
         let kind = match token.kind {
             TokenKind::Plus => Some(ASTBinaryOperatorKind::Add),
             TokenKind::Minus => Some(ASTBinaryOperatorKind::Subtract),
@@ -61,13 +64,25 @@ impl Parser {
             TokenKind::Slash => Some(ASTBinaryOperatorKind::Divide),
             _ => None,
         };
-        kind.map(|kind| ASTBinaryOperator::new(kind, token.clone()))
+        kind.map(|kind| ASTBinaryOperator::new(kind, token.clone())) // return Option<ASTBinaryOperator>
     }
+
+    // Generic Expression
 
     fn parse_primary_expression(&mut self) -> Option<ASTExpression> {
         let token = self.consume()?;
         match token.kind {
             TokenKind::Number(number) => Some(ASTExpression::number(number)),
+            TokenKind::LeftParen => {
+                let expr = self.parse_expression()?;
+                let token = self.consume()?;
+                if token.kind  != TokenKind::RightParen {
+                    panic!("Error")
+                }
+                Some(
+                    ASTExpression::parenthesized(expr)
+                )
+            },
             _ => None,
         } // return ASTExpression
     }
