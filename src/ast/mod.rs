@@ -1,4 +1,4 @@
-use self::lexer::Token;
+use self::lexer::{TextSpan, Token};
 
 pub mod lexer;
 pub mod parser;
@@ -53,6 +53,9 @@ pub trait ASTVisitor {
             },
             ASTExpressionKind::Parenthesized(expr) => {
                 self.visit_parenthesized_expression(expr);
+            },
+            ASTExpressionKind::Error(span) => {
+                self.visit_error(span);
             }
         }
     }
@@ -72,6 +75,9 @@ pub trait ASTVisitor {
     fn visit_parenthesized_expression(&mut self, expr: &ASTParenthesizedExpression) {
         self.do_visit_expression(&expr.expression)
     }
+
+    // Error
+    fn visit_error(&mut self, span: &TextSpan);
 
     fn visit_number(&mut self, number: &ASTNumberExpression);
 }
@@ -122,12 +128,17 @@ impl ASTVisitor for ASTPrinter {
         self.visit_expression(&expr.expression);
         self.indent -= INCREMENT_INDENT_VALUE;
     }
+
+    fn visit_error(&mut self, span: &TextSpan) {
+        self.print_with_indent(&format!("Error: {:?}", span))
+    }
 }
 
 pub enum ASTExpressionKind {
     Number(ASTNumberExpression),
     Binary(ASTBinaryExpression),
-    Parenthesized(ASTParenthesizedExpression)
+    Parenthesized(ASTParenthesizedExpression),
+    Error(TextSpan)
 }
 
 // Binary
@@ -187,6 +198,10 @@ impl ASTExpression {
 
     pub fn number(number: i64) -> Self {
         Self::new(ASTExpressionKind::Number(ASTNumberExpression { number }))
+    }
+
+    pub fn error(span: TextSpan) -> Self {
+        Self::new(ASTExpressionKind::Error(span))
     }
 
     pub fn binary(operator: ASTBinaryOperator, left: ASTExpression, right: ASTExpression) -> Self {

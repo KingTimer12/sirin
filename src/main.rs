@@ -1,6 +1,13 @@
-use crate::ast::{evaluator::ASTEvaluator, lexer::Lexer, parser::Parser, Ast};
+use std::{cell::RefCell, rc::Rc};
+
+use crate::{
+    ast::{evaluator::ASTEvaluator, lexer::Lexer, parser::Parser, Ast},
+    diagnostics::DiagnosticsBagCell,
+};
 
 mod ast;
+mod diagnostics;
+mod text;
 
 fn main() {
     let input = "(800 + 1000000 * 90000000000 / 5) * 0";
@@ -11,8 +18,11 @@ fn main() {
         tokens.push(token)
     }
     println!("{:?}", tokens);
+    let diagnostics_bag: DiagnosticsBagCell =
+        Rc::new(RefCell::new(diagnostics::DiagnosticsBag::new()));
+
     let mut ast = Ast::new();
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, diagnostics_bag);
     while let Some(stmt) = parser.next_statement() {
         ast.add_statement(stmt);
     }
