@@ -51,11 +51,11 @@ impl TextSpan {
         } // return Self
     }
 
-    /*
+    
     pub fn length(&self) -> usize {
         self.end - self.start // return usize
     }
-    */
+    
 }
 
 /* TEXT SPAN */

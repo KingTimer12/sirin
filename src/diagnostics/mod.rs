@@ -2,7 +2,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::ast::lexer::{TextSpan, Token, TokenKind};
 
-mod printer;
+pub mod printer;
 
 pub enum DiagnosticsKind {
     Error,

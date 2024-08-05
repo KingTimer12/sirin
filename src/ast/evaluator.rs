@@ -29,4 +29,8 @@ impl ASTVisitor for ASTEvaluator {
             }
         )
     }
+    
+    fn visit_error(&mut self, span: &super::lexer::TextSpan) {
+        todo!()
+    }
 }
