@@ -11,7 +11,10 @@ pub enum TokenKind {
     RightParen,
     Eof,
     Bad,
-    Whitespace
+    Whitespace,
+    Let,
+    Id,
+    Equals
 }
 
 /* DISPLAY */
@@ -28,7 +31,10 @@ impl Display for TokenKind {
             TokenKind::RightParen => write!(f, ")"),
             TokenKind::Bad => write!(f, "Bad"),
             TokenKind::Whitespace => write!(f, "Whitespace"),
-            TokenKind::Eof => write!(f, "Eof")
+            TokenKind::Eof => write!(f, "Eof"),
+            TokenKind::Let => write!(f, "Let"),
+            TokenKind::Id => write!(f, "Identifier"),
+            TokenKind::Equals => write!(f, "="),
         }
     }
 }
@@ -106,6 +112,12 @@ impl<'a> Lexer<'a> {
             } else if Self::is_whitespace(&c) {
                 self.consume();
                 kind = TokenKind::Whitespace
+            } else if Self::is_identifier_start(&c) {
+                let identifier = self.consume_identifier();
+                kind = match identifier.as_str() {
+                    "let" => TokenKind::Let,
+                    _ => TokenKind::Id
+                }
             } else {
                 kind = self.consume_punctuation();
             }
@@ -123,6 +135,10 @@ impl<'a> Lexer<'a> {
 
     fn is_number_start(c: &char) -> bool {
         c.is_digit(10) // return bool
+    }
+
+    fn is_identifier_start(c: &char) -> bool {
+        c.is_alphabetic()
     }
 
     fn current_char(&self) -> Option<char> {
@@ -160,8 +176,21 @@ impl<'a> Lexer<'a> {
             '/' => TokenKind::Slash,
             '(' => TokenKind::LeftParen,
             ')' => TokenKind::RightParen,
+            '=' => TokenKind::Equals,
             _ => TokenKind::Bad
         }
+    }
+
+    fn consume_identifier(&mut self) -> String {
+        let mut identifier = String::new();
+        while let Some(c) = self.current_char() {
+            if !Self::is_identifier_start(&c) {
+                break;
+            }
+            self.consume().unwrap();
+            identifier.push(c);
+        }
+        identifier
     }
 }
 

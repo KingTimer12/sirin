@@ -43,7 +43,7 @@ impl <'a> DiagnosticsPrinter<'a> {
         let prefix_end = column;
         let prefix = &line[prefix_start..prefix_end];
 
-        let suffix_start = cmp::min(column + diagnostic.span.length(), line.len()) + 1;
+        let suffix_start = cmp::min(column + diagnostic.span.length(), line.len());
         let suffix_end = cmp::min(suffix_start + PREFIX_LENGTH, line.len());
         let suffix = &line[suffix_start..suffix_end];
 
