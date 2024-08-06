@@ -8,7 +8,7 @@ impl SourceText {
     }
 
     pub fn line_index(&self, pos: usize) -> usize {
-        self.text[..pos].lines().count()
+        self.text[..pos].lines().count() - 1
     }
 
     pub fn get_line(&self, index: usize) -> &str {

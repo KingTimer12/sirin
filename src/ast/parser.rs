@@ -1,15 +1,34 @@
-use std::cell::{Ref, RefMut};
+use std::cell::Cell;
 
-use crate::diagnostics::{DiagnosticsBag, DiagnosticsBagCell};
+use crate::diagnostics::DiagnosticsBagCell;
 
 use super::{
     lexer::{Token, TokenKind},
     ASTBinaryOperator, ASTBinaryOperatorKind, ASTExpression, ASTStatement,
 };
 
+pub struct Counter {
+    value: Cell<usize>
+}
+
+impl Counter {
+    pub fn new() -> Self {
+        Self { value: Cell::new(0) }
+    }
+
+    pub fn increment(&self) {
+        let current_value = self.get_value();
+        self.value.set(current_value + 1)
+    }
+
+    pub fn get_value(&self) -> usize {
+        self.value.get()
+    }
+}
+
 pub struct Parser {
     tokens: Vec<Token>,
-    current: usize,
+    current: Counter,
     diagnostics_bag: DiagnosticsBagCell,
 }
 
@@ -21,7 +40,7 @@ impl Parser {
                 .filter(|token| token.kind != TokenKind::Whitespace)
                 .map(|token| token.clone())
                 .collect(),
-            current: 0,
+            current: Counter::new(),
             diagnostics_bag,
         } // return Parser
     }
@@ -33,7 +52,7 @@ impl Parser {
         Some(self.parse_statement()) // return Option<ASTStatement>
     }
 
-    fn is_at_end(&self) -> bool {
+    fn is_at_end(&mut self) -> bool {
         self.current().kind == TokenKind::Eof
     }
 
@@ -84,10 +103,7 @@ impl Parser {
             TokenKind::Number(number) => ASTExpression::number(number),
             TokenKind::LeftParen => {
                 let expr = self.parse_expression();
-                let token = self.consume();
-                if token.kind != TokenKind::RightParen {
-                    panic!("Error")
-                }
+                self.consume_and_check(TokenKind::RightParen);
                 ASTExpression::parenthesized(expr)
             }
             _ => {
@@ -100,7 +116,7 @@ impl Parser {
     }
 
     fn peek(&self, offset: isize) -> &Token {
-        let mut index = (self.current as isize + offset) as usize;
+        let mut index = (self.current.get_value() as isize + offset) as usize;
         if index >= self.tokens.len() {
             index = self.tokens.len() - 1;
         }
@@ -111,12 +127,12 @@ impl Parser {
         self.peek(0) // return &Token
     }
 
-    fn consume(&mut self) -> &Token {
-        self.current += 1;
+    fn consume(&self) -> &Token {
+        self.current.increment();
         self.peek(-1) // return &Token
     }
 
-    fn consume_and_check(&mut self, kind: TokenKind) -> &Token {
+    fn consume_and_check(&self, kind: TokenKind) -> &Token {
         let token = self.consume();
         if token.kind != kind {
             self.diagnostics_bag

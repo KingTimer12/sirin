@@ -57,7 +57,7 @@ impl DiagnosticsBag {
 
     pub fn report_expected_expression(&mut self, token: &Token) {
         self.report_error(
-            format!("Expected -> Expression | Found -> <{}>", token.kind),
+            format!("Expected -> <Expression> | Found -> <{}>", token.kind),
             token.span.clone(),
         )
     }

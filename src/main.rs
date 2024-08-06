@@ -10,7 +10,7 @@ mod diagnostics;
 mod text;
 
 fn main() {
-    let input = "(800 + 1000000 * 90000000000 / 5) * 0";
+    let input = "1 + 1 & 0";
     let text = &text::SourceText::new(input.to_string());
 
     let mut lexer = Lexer::new(input);
@@ -18,7 +18,7 @@ fn main() {
     while let Some(token) = lexer.next_token() {
         tokens.push(token)
     }
-    println!("{:?}", tokens);
+    // println!("{:?}", tokens);
     let diagnostics_bag: DiagnosticsBagCell =
         Rc::new(RefCell::new(diagnostics::DiagnosticsBag::new()));
 
@@ -27,7 +27,7 @@ fn main() {
     while let Some(stmt) = parser.next_statement() {
         ast.add_statement(stmt);
     }
-    ast.visualize();
+    // ast.visualize();
     let diagnostics_binding = diagnostics_bag.borrow();
     if diagnostics_binding.diagnostics.len() > 0 {
         let diagnostics_printer =

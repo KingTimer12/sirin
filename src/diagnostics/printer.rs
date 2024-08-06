@@ -24,21 +24,32 @@ impl <'a> DiagnosticsPrinter<'a> {
         let line_start = self.text.line_start(line_index);
 
         let col = diagnostic.span.start - line_start;
-        let prefix_start = cmp::max(0, col as isize - PREFIX_LENGTH as isize) as usize;
-        let prefix_end = col;
+        let (prefix, span, suffix) = self.get_text_span(diagnostic, line, col);
+
+        let indent = cmp::min(PREFIX_LENGTH, col);
+        let (arrow_pointers, arrow_line) = Self::format_arrow(diagnostic, indent);
+        let error_message = format!("{:indent$}+-- {}", "", diagnostic.message, indent = indent);
+        format!("{}{}{}{}{}\n{}\n{}\n{}", prefix, Fg(Red), span, Fg(Reset), suffix, arrow_pointers, arrow_line, error_message)
+    }
+
+    fn format_arrow(diagnostic: &Diagnostics, indent: usize) -> (String, String) {
+        let arrow_pointers = format!("{:indent$}{}", "", std::iter::repeat('^').take(diagnostic.span.length()).collect::<String>(), indent = indent);
+        let arrow_line = format!("{:indent$}|", "", indent = indent);
+        (arrow_pointers, arrow_line)
+    }
+
+    fn get_text_span(&'a self, diagnostic: &Diagnostics, line: &'a str, column: usize) -> (&'a str, &'a str, &'a str) {
+        let prefix_start = cmp::max(0, column as isize - PREFIX_LENGTH as isize) as usize;
+        let prefix_end = column;
         let prefix = &line[prefix_start..prefix_end];
 
-        let suffix_start = cmp::min(col + diagnostic.span.length(), line.len()) + 1;
+        let suffix_start = cmp::min(column + diagnostic.span.length(), line.len()) + 1;
         let suffix_end = cmp::min(suffix_start + PREFIX_LENGTH, line.len());
         let suffix = &line[suffix_start..suffix_end];
 
         let span = &line[prefix_end..suffix_start];
 
-        let indent = cmp::min(PREFIX_LENGTH, col);
-        let arrow_pointers = format!("{:indent$}{}", "", std::iter::repeat('^').take(diagnostic.span.length()).collect::<String>(), indent = indent);
-        let arrow_line = format!("{:indent$}|", "", indent = indent);
-        let error_message = format!("{:indent$}:+-- {}", "", diagnostic.message, indent = indent);
-        format!("{}{}{}{}{}\n{}\n{}\n{}", prefix, Fg(Red), span, Fg(Reset), suffix, arrow_pointers, arrow_line, error_message)
+        (prefix, span, suffix)
     }
 
     pub fn print(&self) {
