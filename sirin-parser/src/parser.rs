@@ -2,7 +2,7 @@ use chumsky::{
     IterParser, Parser,
     error::Simple,
     extra::Err,
-    primitive::{choice, just},
+    primitive::{choice, end, just},
     recursive::recursive,
     select,
 };
@@ -13,7 +13,8 @@ use crate::{
     stmt::Stmt,
 };
 
-pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Stmt<'a>, Err<Simple<'a, Tokens<'a>>>> {
+pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Vec<Stmt<'a>>, Err<Simple<'a, Tokens<'a>>>>
+{
     let ident_expr = select! { Tokens::Ident(n) => Expr::Var(n) };
     let ident_name = select! { Tokens::Ident(n) => n };
 
@@ -104,7 +105,7 @@ pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Stmt<'a>, Err<Simple<'a
         logical
     });
 
-    recursive(|decl| {
+    let stmt = recursive(|decl| {
         let var = ident_name
             .then_ignore(just(Tokens::Assign))
             .then(expr.clone())
@@ -141,6 +142,45 @@ pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Stmt<'a>, Err<Simple<'a
                 else_,
             });
 
-        var
-    })
+        let fn_multi = just(Tokens::Fn)
+            .ignore_then(ident_name)
+            .then(
+                ident_name
+                    .separated_by(just(Tokens::Comma))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+            )
+            .then(
+                decl.clone()
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+            )
+            .map(|((name, args), body)| Stmt::Fn { name, args, body });
+
+        let fn_single = just(Tokens::Fn)
+            .ignore_then(ident_name)
+            .then(
+                ident_name
+                    .separated_by(just(Tokens::Comma))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+            )
+            .then_ignore(just(Tokens::FatArrow))
+            .then(expr.clone())
+            .map(|((name, args), body)| Stmt::Fn {
+                name,
+                args,
+                body: vec![Stmt::Return(Some(Box::new(body)))],
+            });
+
+        let r#fn = fn_single.or(fn_multi);
+
+        var.or(r#return)
+            .or(r#if)
+            .or(r#fn)
+            .or(expr.clone().map(Stmt::Expr))
+    });
+
+    stmt.repeated().collect::<Vec<_>>().then_ignore(end())
 }
