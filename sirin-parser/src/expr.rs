@@ -8,6 +8,7 @@ pub enum Expr<'a> {
     Str(&'a str),
     Var(&'a str),
     Neg(Box<Expr<'a>>),
+    Not(Box<Expr<'a>>),
     BinOp(BinOp, Box<Expr<'a>>, Box<Expr<'a>>),
     Call(&'a str, Vec<Expr<'a>>),
     If(Box<Expr<'a>>, Vec<Stmt<'a>>, Vec<Stmt<'a>>),

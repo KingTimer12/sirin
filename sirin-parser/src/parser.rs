@@ -2,6 +2,7 @@ use chumsky::{
     IterParser, Parser,
     error::Simple,
     extra::Err,
+    pratt::{infix, left, prefix},
     primitive::{choice, end, just},
     recursive::recursive,
     select,
@@ -27,7 +28,6 @@ pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Vec<Stmt<'a>>, Err<Simp
     ));
 
     let expr = recursive(|p| {
-        // call -> soma(x, y)
         let call = ident_name
             .then(
                 p.clone()
@@ -38,15 +38,13 @@ pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Vec<Stmt<'a>>, Err<Simp
             .map(|(name, args)| Expr::Call(name, args));
 
         let atom = {
-            // parenthesized -> ()
             let parenthesized = p
                 .clone()
                 .delimited_by(just(Tokens::LParen), just(Tokens::RParen));
-
-            let integer = select! { Tokens::Integer(n) => Expr::Int(n) }; // 4
-            let float = select! { Tokens::Float(n) => Expr::Float(n) }; // 4.3
-            let string = select! { Tokens::Str(n) => Expr::Str(n) }; // "str"
-            let boolean = select! { Tokens::Boolean(n) => Expr::Boolean(n) }; //true ou false
+            let integer = select! { Tokens::Integer(n) => Expr::Int(n) };
+            let float = select! { Tokens::Float(n)   => Expr::Float(n) };
+            let string = select! { Tokens::Str(n)     => Expr::Str(n) };
+            let boolean = select! { Tokens::Boolean(n) => Expr::Boolean(n) };
 
             parenthesized
                 .or(integer)
@@ -57,60 +55,51 @@ pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Vec<Stmt<'a>>, Err<Simp
                 .or(ident_expr)
         };
 
-        // -x | -soma(x, y)
-        let unary = just(Tokens::Minus)
-            .repeated()
-            .foldr(atom, |_op, rhs| Expr::Neg(Box::new(rhs)));
-
-        // x * y | x / y
-        let product = unary.clone().foldl(
-            choice((
-                just(Tokens::Multiply).to(BinOp::Mul),
-                just(Tokens::Divide).to(BinOp::Div),
-            ))
-            .then(unary)
-            .repeated(),
-            |lhs, (op, rhs)| Expr::BinOp(op, Box::new(lhs), Box::new(rhs)),
-        );
-
-        // x + y // x - y
-        let sum = product.clone().foldl(
-            choice((
-                just(Tokens::Plus).to(BinOp::Add),
-                just(Tokens::Minus).to(BinOp::Sub),
-            ))
-            .then(product)
-            .repeated(),
-            |lhs, (op, rhs)| Expr::BinOp(op, Box::new(lhs), Box::new(rhs)),
-        );
-
-        // x == y // x != y // x >= y // x <= y // x > y // x < y
-        let comparison = sum.clone().foldl(
-            choice((
-                just(Tokens::Eq).to(BinOp::Eq),
-                just(Tokens::NotEq).to(BinOp::NotEq),
-                just(Tokens::GtEq).to(BinOp::GtEq),
-                just(Tokens::LtEq).to(BinOp::LtEq),
-                just(Tokens::Gt).to(BinOp::Gt),
-                just(Tokens::Lt).to(BinOp::Lt),
-            ))
-            .then(sum)
-            .repeated(),
-            |lhs, (op, rhs)| Expr::BinOp(op, Box::new(lhs), Box::new(rhs)),
-        );
-
-        // x and y | x or y
-        let logical = comparison.clone().foldl(
-            choice((
-                just(Tokens::And).to(BinOp::And),
-                just(Tokens::Or).to(BinOp::Or),
-            ))
-            .then(comparison)
-            .repeated(),
-            |lhs, (op, rhs)| Expr::BinOp(op, Box::new(lhs), Box::new(rhs)),
-        );
-
-        logical
+        atom.pratt((
+            // prefix
+            prefix(6, just(Tokens::Minus), |_, rhs, _| Expr::Neg(Box::new(rhs))), // -x
+            prefix(6, just(Tokens::Not), |_, rhs, _| Expr::Not(Box::new(rhs))),   // !x
+            // product — precedência 5
+            infix(left(5), just(Tokens::Multiply), |lhs, _, rhs, _| {
+                Expr::BinOp(BinOp::Mul, Box::new(lhs), Box::new(rhs)) // x * y
+            }),
+            infix(left(5), just(Tokens::Divide), |lhs, _, rhs, _| {
+                Expr::BinOp(BinOp::Div, Box::new(lhs), Box::new(rhs)) // x / y
+            }),
+            // sum — precedência 4
+            infix(left(4), just(Tokens::Plus), |lhs, _, rhs, _| {
+                Expr::BinOp(BinOp::Add, Box::new(lhs), Box::new(rhs)) // x + y
+            }),
+            infix(left(4), just(Tokens::Minus), |lhs, _, rhs, _| {
+                Expr::BinOp(BinOp::Sub, Box::new(lhs), Box::new(rhs)) // x - y
+            }),
+            // comparison — precedência 3
+            infix(left(3), just(Tokens::Eq), |lhs, _, rhs, _| {
+                Expr::BinOp(BinOp::Eq, Box::new(lhs), Box::new(rhs)) // x == y
+            }),
+            infix(left(3), just(Tokens::NotEq), |lhs, _, rhs, _| {
+                Expr::BinOp(BinOp::NotEq, Box::new(lhs), Box::new(rhs)) // x != y
+            }),
+            infix(left(3), just(Tokens::Gt), |lhs, _, rhs, _| {
+                Expr::BinOp(BinOp::Gt, Box::new(lhs), Box::new(rhs)) // x > y
+            }),
+            infix(left(3), just(Tokens::Lt), |lhs, _, rhs, _| {
+                Expr::BinOp(BinOp::Lt, Box::new(lhs), Box::new(rhs)) // x < y
+            }),
+            infix(left(3), just(Tokens::GtEq), |lhs, _, rhs, _| {
+                Expr::BinOp(BinOp::GtEq, Box::new(lhs), Box::new(rhs)) // x >= y
+            }),
+            infix(left(3), just(Tokens::LtEq), |lhs, _, rhs, _| {
+                Expr::BinOp(BinOp::LtEq, Box::new(lhs), Box::new(rhs)) // x <= y
+            }),
+            // logical — precedência 2
+            infix(left(2), just(Tokens::And), |lhs, _, rhs, _| {
+                Expr::BinOp(BinOp::And, Box::new(lhs), Box::new(rhs)) // x and y
+            }),
+            infix(left(2), just(Tokens::Or), |lhs, _, rhs, _| {
+                Expr::BinOp(BinOp::Or, Box::new(lhs), Box::new(rhs)) // x or y
+            }),
+        ))
     });
 
     let stmt = recursive(|decl| {
@@ -150,7 +139,17 @@ pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Vec<Stmt<'a>>, Err<Simp
                 else_,
             });
 
-        let fn_multi = just(Tokens::Fn)
+        let fn_body = choice((
+            just(Tokens::FatArrow)
+                .ignore_then(expr.clone())
+                .map(|body| vec![Stmt::Return(Some(Box::new(body)))]),
+            decl.clone()
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+        ));
+
+        let r#fn = just(Tokens::Fn)
             .ignore_then(ident_name)
             .then(
                 ident_name
@@ -161,40 +160,13 @@ pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Vec<Stmt<'a>>, Err<Simp
                     .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
             )
             .then(just(Tokens::Arrow).ignore_then(ty.clone()).or_not())
-            .then(
-                decl.clone()
-                    .repeated()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
-            )
+            .then(fn_body)
             .map(|(((name, args), return_type), body)| Stmt::Fn {
                 name,
                 args,
                 return_type,
                 body,
             });
-
-        let fn_single = just(Tokens::Fn)
-            .ignore_then(ident_name)
-            .then(
-                ident_name
-                    .then_ignore(just(Tokens::Colon))
-                    .then(ty.clone())
-                    .separated_by(just(Tokens::Comma))
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
-            )
-            .then(just(Tokens::Arrow).ignore_then(ty.clone()).or_not())
-            .then_ignore(just(Tokens::FatArrow))
-            .then(expr.clone())
-            .map(|(((name, args), return_type), body)| Stmt::Fn {
-                name,
-                args,
-                return_type,
-                body: vec![Stmt::Return(Some(Box::new(body)))],
-            });
-
-        let r#fn = fn_single.or(fn_multi);
 
         var.or(r#return)
             .or(r#if)

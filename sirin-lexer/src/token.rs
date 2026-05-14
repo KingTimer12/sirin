@@ -23,6 +23,8 @@ pub enum Tokens<'a> {
     And,
     #[token("or")]
     Or,
+    #[token("!")]
+    Not,
 
     // Op
     #[token("==")]

@@ -1,0 +1,7 @@
+[package]
+name = "sirin-typechecker"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sirin-parser = { workspace = true }

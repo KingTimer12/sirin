@@ -13,7 +13,7 @@ mod tests {
         assert_eq!(text.next(), Some(Ok(Tokens::Ident("a"))));
         assert_eq!(text.slice(), "a");
         assert_eq!(text.next(), Some(Ok(Tokens::Whitespace)));
-        assert_eq!(text.next(), Some(Ok(Tokens::Eq)));
+        assert_eq!(text.next(), Some(Ok(Tokens::Assign)));
         assert_eq!(text.slice(), "=");
         assert_eq!(text.next(), Some(Ok(Tokens::Whitespace)));
         assert_eq!(text.next(), Some(Ok(Tokens::Integer(5))));
@@ -27,7 +27,7 @@ mod tests {
         assert_eq!(text.next(), Some(Ok(Tokens::Ident("a"))));
         assert_eq!(text.slice(), "a");
         assert_eq!(text.next(), Some(Ok(Tokens::Whitespace)));
-        assert_eq!(text.next(), Some(Ok(Tokens::Eq)));
+        assert_eq!(text.next(), Some(Ok(Tokens::Assign)));
         assert_eq!(text.slice(), "=");
         assert_eq!(text.next(), Some(Ok(Tokens::Whitespace)));
         assert_eq!(text.next(), Some(Ok(Tokens::Float(0.4))));
@@ -96,7 +96,7 @@ mod tests {
             .filter(|t| !matches!(t, Ok(Tokens::Whitespace)))
             .collect();
         assert_eq!(tokens[0], Ok(Tokens::Ident("x")));
-        assert_eq!(tokens[1], Ok(Tokens::Eq));
+        assert_eq!(tokens[1], Ok(Tokens::Assign));
         assert_eq!(tokens[2], Ok(Tokens::Integer(10)));
         assert_eq!(tokens[3], Ok(Tokens::Plus));
         assert_eq!(tokens[4], Ok(Tokens::Integer(3)));

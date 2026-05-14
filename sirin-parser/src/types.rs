@@ -5,4 +5,5 @@ pub enum Type {
     Str,
     Bool,
     Void,
+    Nullable(Box<Type>),
 }
