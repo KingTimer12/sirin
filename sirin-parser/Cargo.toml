@@ -1,0 +1,9 @@
+[package]
+name = "sirin-parser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chumsky = { workspace = true }
+sirin-lexer = { workspace = true }
+logos = { workspace = true }
