@@ -1,4 +1,4 @@
-use crate::expr::Expr;
+use crate::{expr::Expr, types::Type};
 
 #[derive(Debug)]
 pub enum Stmt<'a> {
@@ -8,7 +8,8 @@ pub enum Stmt<'a> {
     },
     Fn {
         name: &'a str,
-        args: Vec<&'a str>,
+        args: Vec<(&'a str, Type)>,
+        return_type: Option<Type>, 
         body: Vec<Stmt<'a>>,
     },
     Return(Option<Box<Expr<'a>>>),

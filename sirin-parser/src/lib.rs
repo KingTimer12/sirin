@@ -2,6 +2,7 @@ pub mod eval;
 pub mod expr;
 pub mod parser;
 pub mod stmt;
+pub mod types;
 
 #[cfg(test)]
 mod tests {

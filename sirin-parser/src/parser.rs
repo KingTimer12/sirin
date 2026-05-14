@@ -11,12 +11,20 @@ use sirin_lexer::token::Tokens;
 use crate::{
     expr::{BinOp, Expr},
     stmt::Stmt,
+    types::Type,
 };
 
 pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Vec<Stmt<'a>>, Err<Simple<'a, Tokens<'a>>>>
 {
     let ident_expr = select! { Tokens::Ident(n) => Expr::Var(n) };
     let ident_name = select! { Tokens::Ident(n) => n };
+
+    let ty = choice((
+        just(Tokens::IntType).to(Type::Int),
+        just(Tokens::FloatType).to(Type::Float),
+        just(Tokens::StringType).to(Type::Str),
+        just(Tokens::BoolType).to(Type::Bool),
+    ));
 
     let expr = recursive(|p| {
         // call -> soma(x, y)
@@ -146,31 +154,43 @@ pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Vec<Stmt<'a>>, Err<Simp
             .ignore_then(ident_name)
             .then(
                 ident_name
+                    .then_ignore(just(Tokens::Colon))
+                    .then(ty.clone())
                     .separated_by(just(Tokens::Comma))
                     .collect::<Vec<_>>()
                     .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
             )
+            .then(just(Tokens::Arrow).ignore_then(ty.clone()).or_not())
             .then(
                 decl.clone()
                     .repeated()
                     .collect::<Vec<_>>()
                     .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
             )
-            .map(|((name, args), body)| Stmt::Fn { name, args, body });
+            .map(|(((name, args), return_type), body)| Stmt::Fn {
+                name,
+                args,
+                return_type,
+                body,
+            });
 
         let fn_single = just(Tokens::Fn)
             .ignore_then(ident_name)
             .then(
                 ident_name
+                    .then_ignore(just(Tokens::Colon))
+                    .then(ty.clone())
                     .separated_by(just(Tokens::Comma))
                     .collect::<Vec<_>>()
                     .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
             )
+            .then(just(Tokens::Arrow).ignore_then(ty.clone()).or_not())
             .then_ignore(just(Tokens::FatArrow))
             .then(expr.clone())
-            .map(|((name, args), body)| Stmt::Fn {
+            .map(|(((name, args), return_type), body)| Stmt::Fn {
                 name,
                 args,
+                return_type,
                 body: vec![Stmt::Return(Some(Box::new(body)))],
             });
 
