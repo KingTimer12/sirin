@@ -2,10 +2,12 @@ use chumsky::{
     IterParser, Parser,
     error::Simple,
     extra::Err,
+    input::MappedInput,
     pratt::{infix, left, prefix},
     primitive::{choice, end, just},
     recursive::recursive,
     select,
+    span::SimpleSpan,
 };
 use sirin_diagnostics::span::Span;
 use sirin_lexer::token::Tokens;
@@ -17,7 +19,10 @@ use crate::{
     types::Type,
 };
 
-fn sp(s: chumsky::span::SimpleSpan) -> Span {
+pub type TokenInput<'a> =
+    MappedInput<'a, Tokens<'a>, SimpleSpan, &'a [(Tokens<'a>, SimpleSpan)]>;
+
+fn sp(s: SimpleSpan) -> Span {
     Span {
         start: s.start,
         end: s.end,
@@ -26,7 +31,7 @@ fn sp(s: chumsky::span::SimpleSpan) -> Span {
 }
 
 pub fn parser<'a>()
--> impl Parser<'a, &'a [Tokens<'a>], Vec<Spanned<Stmt<'a>>>, Err<Simple<'a, Tokens<'a>>>> {
+-> impl Parser<'a, TokenInput<'a>, Vec<Spanned<Stmt<'a>>>, Err<Simple<'a, Tokens<'a>>>> {
     let ident_expr = select! { Tokens::Ident(n) => Expr::Var(n) };
     let ident_name = select! { Tokens::Ident(n) => n };
     let spanned_name = ident_name
@@ -163,6 +168,12 @@ pub fn parser<'a>()
             .then(expr.clone())
             .map_with(|(name, rhs), extra| Spanned::new(Stmt::Let { name, rhs }, sp(extra.span())));
 
+        let copy_var = spanned_name
+            .clone()
+            .then_ignore(just(Tokens::ColonAssign))
+            .then(expr.clone())
+            .map_with(|(name, rhs), extra| Spanned::new(Stmt::CopyLet { name, rhs }, sp(extra.span())));
+
         let r#return = just(Tokens::Return)
             .ignore_then(expr.clone().or_not())
             .then(just(Tokens::If).ignore_then(expr.clone()).or_not())
@@ -252,7 +263,7 @@ pub fn parser<'a>()
                 )
             });
 
-        var.or(r#return).or(r#if).or(r#fn).or(expr
+        copy_var.or(var).or(r#return).or(r#if).or(r#fn).or(expr
             .clone()
             .map_with(|e, extra| Spanned::new(Stmt::Expr(e), sp(extra.span()))))
     });

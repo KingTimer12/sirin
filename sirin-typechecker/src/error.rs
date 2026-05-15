@@ -12,4 +12,5 @@ pub enum CheckerError<'a> {
     GenericError(String),        // fallback
     PossibleNull(&'a str, Type), // quando pode ser nulo, não deixará continuar
     InvalidOperation { op: BinOp, ty: Type },
+    UseAfterMove { var: &'a str, moved_to: String },
 }

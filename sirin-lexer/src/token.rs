@@ -54,6 +54,8 @@ pub enum Tokens<'a> {
     // Function tokens
     #[token("fn")]
     Fn,
+    #[token(":=")]
+    ColonAssign,
     #[token(":")]
     Colon,
     #[token("->")]

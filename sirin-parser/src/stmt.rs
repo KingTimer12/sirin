@@ -6,6 +6,10 @@ pub enum Stmt<'a> {
         name: Spanned<&'a str>,
         rhs:  Spanned<Expr<'a>>,
     },
+    CopyLet {
+        name: Spanned<&'a str>,
+        rhs:  Spanned<Expr<'a>>,
+    },
     Fn {
         name:        Spanned<&'a str>,
         args:        Vec<(Spanned<&'a str>, Type)>,

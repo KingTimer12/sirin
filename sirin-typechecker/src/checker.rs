@@ -6,7 +6,7 @@ use sirin_parser::{
     types::Type,
 };
 
-use crate::{env::Env, error::CheckerError};
+use crate::{env::{Env, OwnershipState}, error::CheckerError};
 
 pub struct Checker<'a> {
     pub src: &'a str,
@@ -21,9 +21,33 @@ impl<'a> Checker<'a> {
     pub fn check_stmt(&mut self, stmt: &Spanned<Stmt<'a>>) -> Result<(), CheckerError<'a>> {
         match &stmt.node {
             Stmt::Let { name, rhs } => {
-                let ty = self.check_expr(rhs)?;
-                self.env.define(name.node, ty);
-                Ok(())
+                match self.check_expr(rhs) {
+                    Ok(ty) => {
+                        if let Expr::Var(src_name) = &rhs.node {
+                            if !ty.is_copy() {
+                                self.env.mark_moved(src_name, name.node.to_string());
+                            }
+                        }
+                        self.env.define(name.node, ty);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        self.env.define(name.node, Type::Void);
+                        Err(e)
+                    }
+                }
+            }
+            Stmt::CopyLet { name, rhs } => {
+                match self.check_expr(rhs) {
+                    Ok(ty) => {
+                        self.env.define(name.node, ty);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        self.env.define(name.node, Type::Void);
+                        Err(e)
+                    }
+                }
             }
             Stmt::Fn { args, return_type, body, .. } => {
                 self.env.push_scope();
@@ -95,7 +119,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_expr(&self, expr: &Spanned<Expr<'a>>) -> Result<Type, CheckerError<'a>> {
+    fn check_expr(&mut self, expr: &Spanned<Expr<'a>>) -> Result<Type, CheckerError<'a>> {
         match &expr.node {
             Expr::Int(_) => Ok(Type::Int),
             Expr::Float(_) => Ok(Type::Float),
@@ -105,7 +129,19 @@ impl<'a> Checker<'a> {
                 let lhs_ty = self.check_expr(left)?;
                 let rhs_ty = self.check_expr(right)?;
 
+                // suprimir cascata de erros anteriores
+                if lhs_ty == Type::Void || rhs_ty == Type::Void {
+                    return Ok(Type::Void);
+                }
+
                 if lhs_ty != rhs_ty {
+                    report_error(
+                        &expr.span.file,
+                        self.src,
+                        &expr.span,
+                        "tipos incompatíveis",
+                        &format!("esperava `{:?}`, encontrou `{:?}`", lhs_ty, rhs_ty),
+                    );
                     return Err(CheckerError::TypeError(lhs_ty, rhs_ty));
                 }
 
@@ -136,16 +172,31 @@ impl<'a> Checker<'a> {
                 }
                 Ok(Type::Bool)
             }
-            Expr::Var(name) => self.env.get(name).cloned().ok_or_else(|| {
-                report_error(
-                    &expr.span.file,
-                    self.src,
-                    &expr.span,
-                    "variável não declarada",
-                    &format!("`{}` não foi declarada nesse escopo", name),
-                );
-                CheckerError::NameError(name)
-            }),
+            Expr::Var(name) => {
+                if let Some(state) = self.env.get_ownership(name) {
+                    if let OwnershipState::Moved { to } = state {
+                        let moved_to = to.clone();
+                        report_error(
+                            &expr.span.file,
+                            self.src,
+                            &expr.span,
+                            "uso após move",
+                            &format!("`{}` foi movido para `{}`", name, moved_to),
+                        );
+                        return Err(CheckerError::UseAfterMove { var: name, moved_to });
+                    }
+                }
+                self.env.get(name).cloned().ok_or_else(|| {
+                    report_error(
+                        &expr.span.file,
+                        self.src,
+                        &expr.span,
+                        "variável não declarada",
+                        &format!("`{}` não foi declarada nesse escopo", name),
+                    );
+                    CheckerError::NameError(name)
+                })
+            }
             Expr::Call(_, _) => Ok(Type::Int), // TODO: resolução de fn
         }
     }

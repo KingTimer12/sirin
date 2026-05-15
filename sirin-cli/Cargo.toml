@@ -1,0 +1,13 @@
+[package]
+name = "sirin-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sirin-parser       = { workspace = true }
+sirin-diagnostics  = { workspace = true }
+sirin-lexer        = { workspace = true }
+sirin-typechecker  = { workspace = true }
+clap               = { workspace = true }
+logos              = { workspace = true }
+chumsky            = { workspace = true }
