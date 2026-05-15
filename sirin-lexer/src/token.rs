@@ -1,6 +1,7 @@
 use logos::Logos;
+use sirin_diagnostics::span::Span;
 
-use crate::error::LexingError;
+use crate::{error::LexingError, span::SpannedToken};
 
 #[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(error(LexingError, LexingError::from_lexer))]
@@ -105,4 +106,27 @@ pub enum Tokens<'a> {
         &s[1..s.len()-1]
     })]
     Str(&'a str),
+}
+
+impl<'a> Tokens<'a> {
+    pub fn tokenize(src: &'a str, file: &str) -> Vec<SpannedToken<'a>> {
+        let mut lex = Self::lexer(src);
+        let mut tokens = vec![];
+
+        while let Some(tok) = lex.next() {
+            let range = lex.span();
+            if let Ok(token) = tok {
+                tokens.push(SpannedToken {
+                    node: token,
+                    span: Span {
+                        start: range.start,
+                        end: range.end,
+                        file: file.to_string(),
+                    },
+                });
+            }
+        }
+
+        tokens
+    }
 }

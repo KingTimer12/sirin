@@ -1,5 +1,7 @@
+use sirin_diagnostics::report_error;
 use sirin_parser::{
     expr::{BinOp, Expr},
+    span::Spanned,
     stmt::Stmt,
     types::Type,
 };
@@ -7,33 +9,29 @@ use sirin_parser::{
 use crate::{env::Env, error::CheckerError};
 
 pub struct Checker<'a> {
+    pub src: &'a str,
     pub(crate) env: Env<'a>,
 }
 
 impl<'a> Checker<'a> {
-    pub fn check_stmt(&mut self, stmt: &'a Stmt<'a>) -> Result<(), CheckerError<'a>> {
-        match stmt {
+    pub fn new(src: &'a str) -> Self {
+        Self { src, env: Env::new() }
+    }
+
+    pub fn check_stmt(&mut self, stmt: &Spanned<Stmt<'a>>) -> Result<(), CheckerError<'a>> {
+        match &stmt.node {
             Stmt::Let { name, rhs } => {
-                // infere o tipo do lado direito
                 let ty = self.check_expr(rhs)?;
-                // registra a variável com o tipo inferido
-                self.env.define(name, ty);
+                self.env.define(name.node, ty);
                 Ok(())
             }
-            Stmt::Fn {
-                name,
-                args,
-                return_type,
-                body,
-            } => {
+            Stmt::Fn { args, return_type, body, .. } => {
                 self.env.push_scope();
 
-                // registra os parâmetros no escopo
                 for (arg_name, arg_ty) in args {
-                    self.env.define(arg_name, arg_ty.clone());
+                    self.env.define(arg_name.node, arg_ty.clone());
                 }
 
-                // define o retorno esperado
                 self.env.set_return(return_type.clone());
 
                 for stmt in body {
@@ -50,14 +48,12 @@ impl<'a> Checker<'a> {
                     return Err(CheckerError::TypeError(Type::Bool, cond_ty));
                 }
 
-                // escopo do then
                 self.env.push_scope();
                 for stmt in then {
                     self.check_stmt(stmt)?;
                 }
                 self.env.pop_scope();
 
-                // escopo do else
                 if let Some(else_stmts) = else_ {
                     self.env.push_scope();
                     for stmt in else_stmts {
@@ -69,7 +65,6 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
             Stmt::Return { value, cond } => {
-                // verifica a condição se existir
                 if let Some(cond_expr) = cond {
                     let cond_ty = self.check_expr(cond_expr)?;
                     if cond_ty != Type::Bool {
@@ -77,7 +72,6 @@ impl<'a> Checker<'a> {
                     }
                 }
 
-                // verifica o tipo do valor
                 let return_ty = match value {
                     Some(expr) => self.check_expr(expr)?,
                     None => Type::Void,
@@ -87,21 +81,22 @@ impl<'a> Checker<'a> {
                     None => Err(CheckerError::ReturnOutsideFn),
                     Some(expected) => {
                         if return_ty != expected {
-                            Err(CheckerError::TypeError(expected.clone(), return_ty))
+                            Err(CheckerError::TypeError(expected, return_ty))
                         } else {
                             Ok(())
                         }
                     }
                 }
             }
-            _ => Err(CheckerError::GenericError(format!(
-                "expressão não suportada pelo typechecker ainda"
-            ))),
+            Stmt::Expr(expr) => {
+                self.check_expr(expr)?;
+                Ok(())
+            }
         }
     }
 
-    fn check_expr(&self, expr: &'a Expr<'a>) -> Result<Type, CheckerError<'a>> {
-        match expr {
+    fn check_expr(&self, expr: &Spanned<Expr<'a>>) -> Result<Type, CheckerError<'a>> {
+        match &expr.node {
             Expr::Int(_) => Ok(Type::Int),
             Expr::Float(_) => Ok(Type::Float),
             Expr::Str(_) => Ok(Type::Str),
@@ -117,18 +112,12 @@ impl<'a> Checker<'a> {
                 match op {
                     BinOp::Add => match lhs_ty {
                         Type::Int | Type::Float => Ok(lhs_ty),
-                        Type::Str => Ok(Type::Str), // concatenação
-                        _ => Err(CheckerError::InvalidOperation {
-                            op: op.clone(),
-                            ty: lhs_ty,
-                        }),
+                        Type::Str => Ok(Type::Str),
+                        _ => Err(CheckerError::InvalidOperation { op: op.clone(), ty: lhs_ty }),
                     },
                     BinOp::Sub | BinOp::Mul | BinOp::Div => match lhs_ty {
                         Type::Int | Type::Float => Ok(lhs_ty),
-                        _ => Err(CheckerError::InvalidOperation {
-                            op: op.clone(),
-                            ty: lhs_ty,
-                        }),
+                        _ => Err(CheckerError::InvalidOperation { op: op.clone(), ty: lhs_ty }),
                     },
                     BinOp::Eq
                     | BinOp::NotEq
@@ -139,14 +128,25 @@ impl<'a> Checker<'a> {
                     BinOp::And | BinOp::Or => Ok(Type::Bool),
                 }
             }
-
-            Expr::Var(name) => self
-                .env
-                .get(name)
-                .cloned()
-                .ok_or(CheckerError::NameError(name)),
-
-            _ => Ok(Type::Int),
+            Expr::Neg(rhs) => self.check_expr(rhs),
+            Expr::Not(rhs) => {
+                let ty = self.check_expr(rhs)?;
+                if ty != Type::Bool {
+                    return Err(CheckerError::TypeError(Type::Bool, ty));
+                }
+                Ok(Type::Bool)
+            }
+            Expr::Var(name) => self.env.get(name).cloned().ok_or_else(|| {
+                report_error(
+                    &expr.span.file,
+                    self.src,
+                    &expr.span,
+                    "variável não declarada",
+                    &format!("`{}` não foi declarada nesse escopo", name),
+                );
+                CheckerError::NameError(name)
+            }),
+            Expr::Call(_, _) => Ok(Type::Int), // TODO: resolução de fn
         }
     }
 }

@@ -1,25 +1,25 @@
-use crate::{expr::Expr, types::Type};
+use crate::{expr::Expr, span::Spanned, types::Type};
 
 #[derive(Debug)]
 pub enum Stmt<'a> {
     Let {
-        name: &'a str,
-        rhs: Expr<'a>,
+        name: Spanned<&'a str>,
+        rhs:  Spanned<Expr<'a>>,
     },
     Fn {
-        name: &'a str,
-        args: Vec<(&'a str, Type)>,
-        return_type: Option<Type>, 
-        body: Vec<Stmt<'a>>,
+        name:        Spanned<&'a str>,
+        args:        Vec<(Spanned<&'a str>, Type)>,
+        return_type: Option<Type>,
+        body:        Vec<Spanned<Stmt<'a>>>,
     },
     Return {
-        value: Option<Box<Expr<'a>>>,
-        cond:  Option<Box<Expr<'a>>>,
+        value: Option<Box<Spanned<Expr<'a>>>>,
+        cond:  Option<Box<Spanned<Expr<'a>>>>,
     },
-    Expr(Expr<'a>),
     If {
-        cond: Box<Expr<'a>>,
-        then: Vec<Stmt<'a>>,
-        else_: Option<Vec<Stmt<'a>>>,
+        cond:  Box<Spanned<Expr<'a>>>,
+        then:  Vec<Spanned<Stmt<'a>>>,
+        else_: Option<Vec<Spanned<Stmt<'a>>>>,
     },
+    Expr(Spanned<Expr<'a>>),
 }

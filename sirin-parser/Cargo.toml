@@ -7,3 +7,4 @@ edition.workspace = true
 chumsky = { workspace = true }
 sirin-lexer = { workspace = true }
 logos = { workspace = true }
+sirin-diagnostics = { workspace = true }

@@ -1,17 +1,16 @@
-use crate::stmt::Stmt;
+use crate::{span::Spanned, stmt::Stmt};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr<'a> {
     Int(i64),
     Float(f64),
-    Boolean(bool),
     Str(&'a str),
+    Boolean(bool),
     Var(&'a str),
-    Neg(Box<Expr<'a>>),
-    Not(Box<Expr<'a>>),
-    BinOp(BinOp, Box<Expr<'a>>, Box<Expr<'a>>),
-    Call(&'a str, Vec<Expr<'a>>),
-    If(Box<Expr<'a>>, Vec<Stmt<'a>>, Vec<Stmt<'a>>),
+    Neg(Box<Spanned<Expr<'a>>>),
+    Not(Box<Spanned<Expr<'a>>>),
+    BinOp(BinOp, Box<Spanned<Expr<'a>>>, Box<Spanned<Expr<'a>>>),
+    Call(&'a str, Vec<Spanned<Expr<'a>>>),
 }
 
 #[derive(Debug, Clone)]

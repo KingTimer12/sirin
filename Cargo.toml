@@ -1,5 +1,5 @@
 [workspace]
-members = ["sirin-lexer", "sirin-parser","sirin-runtime", "sirin-typechecker"]
+members = ["sirin-diagnostics","sirin-lexer", "sirin-parser","sirin-runtime", "sirin-typechecker"]
 resolver = "3"
 
 [workspace.package]
@@ -7,10 +7,11 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-termion = "4.0.2"
+ariadne = "0.6.0"
 
 logos = "0.16.1"
 chumsky = { version = "0.13.0", features = ["pratt"] }
 
 sirin-lexer = { path = "sirin-lexer" }
 sirin-parser = { path = "sirin-parser" }
+sirin-diagnostics = { path = "sirin-diagnostics" }

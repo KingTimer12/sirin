@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-sirin-parser = { workspace = true }
+sirin-parser       = { workspace = true }
+sirin-diagnostics  = { workspace = true }
 
 [dev-dependencies]
 sirin-lexer = { workspace = true }

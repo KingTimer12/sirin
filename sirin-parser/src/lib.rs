@@ -1,6 +1,7 @@
 pub mod eval;
 pub mod expr;
 pub mod parser;
+pub mod span;
 pub mod stmt;
 pub mod types;
 
@@ -32,24 +33,29 @@ mod tests {
 
         assert_eq!(stmts.len(), 2);
 
-        match &stmts[0] {
+        // stmts[i] is Spanned<Stmt> — match on .node
+        match &stmts[0].node {
             Stmt::Fn {
                 name,
                 args,
                 return_type,
                 body,
             } => {
-                assert_eq!(*name, "soma");
+                assert_eq!(name.node, "soma");
                 assert_eq!(args.len(), 2);
-                assert_eq!(args[0], ("a", Type::Int));
-                assert_eq!(args[1], ("b", Type::Int));
+                assert_eq!(args[0].0.node, "a");
+                assert_eq!(args[0].1, Type::Int);
+                assert_eq!(args[1].0.node, "b");
+                assert_eq!(args[1].1, Type::Int);
                 assert_eq!(*return_type, Some(Type::Int));
                 assert_eq!(body.len(), 1);
-                match &body[0] {
+                // body[i] is Spanned<Stmt>
+                match &body[0].node {
                     Stmt::Return {
                         value: Some(expr), ..
                     } => {
-                        assert!(matches!(expr.as_ref(), Expr::BinOp(BinOp::Add, _, _)));
+                        // expr: &Box<Spanned<Expr>>, auto-deref to Spanned<Expr>
+                        assert!(matches!(expr.node, Expr::BinOp(BinOp::Add, _, _)));
                     }
                     _ => panic!("expected return with binop"),
                 }
@@ -57,15 +63,17 @@ mod tests {
             _ => panic!("expected fn declaration"),
         }
 
-        match &stmts[1] {
+        match &stmts[1].node {
             Stmt::Let { name, rhs } => {
-                assert_eq!(*name, "x");
-                match rhs {
+                assert_eq!(name.node, "x");
+                // rhs is Spanned<Expr>
+                match &rhs.node {
                     Expr::Call(fn_name, args) => {
                         assert_eq!(*fn_name, "soma");
                         assert_eq!(args.len(), 2);
-                        assert!(matches!(args[0], Expr::Int(1)));
-                        assert!(matches!(args[1], Expr::Int(2)));
+                        // args[i] is Spanned<Expr>
+                        assert!(matches!(args[0].node, Expr::Int(1)));
+                        assert!(matches!(args[1].node, Expr::Int(2)));
                     }
                     _ => panic!("expected call expression"),
                 }
@@ -81,19 +89,20 @@ mod tests {
         let stmts = parser().parse(&tokens).into_result().expect("parse failed");
 
         assert_eq!(stmts.len(), 1);
-        match &stmts[0] {
+        match &stmts[0].node {
             Stmt::Fn {
                 name,
                 args,
                 return_type,
                 body,
             } => {
-                assert_eq!(*name, "noop");
-                assert_eq!(args[0], ("x", Type::Bool));
+                assert_eq!(name.node, "noop");
+                assert_eq!(args[0].0.node, "x");
+                assert_eq!(args[0].1, Type::Bool);
                 assert_eq!(*return_type, None);
                 assert_eq!(body.len(), 1);
                 assert!(matches!(
-                    body[0],
+                    body[0].node,
                     Stmt::Return {
                         value: None,
                         cond: None
@@ -111,16 +120,18 @@ mod tests {
         let stmts = parser().parse(&tokens).into_result().expect("parse failed");
 
         assert_eq!(stmts.len(), 1);
-        match &stmts[0] {
+        match &stmts[0].node {
             Stmt::Fn {
                 name, args, body, ..
             } => {
-                assert_eq!(*name, "dobro");
-                assert_eq!(args[0], ("x", Type::Int));
+                assert_eq!(name.node, "dobro");
+                assert_eq!(args[0].0.node, "x");
+                assert_eq!(args[0].1, Type::Int);
                 assert_eq!(body.len(), 1);
-                assert!(
-                    matches!(&body[0], Stmt::Return { value: Some(e), .. } if matches!(e.as_ref(), Expr::BinOp(BinOp::Add, _, _)))
-                );
+                assert!(matches!(
+                    &body[0].node,
+                    Stmt::Return { value: Some(e), .. } if matches!(e.node, Expr::BinOp(BinOp::Add, _, _))
+                ));
             }
             _ => panic!("expected fn declaration"),
         }
@@ -133,9 +144,10 @@ mod tests {
         let stmts = parser().parse(&tokens).into_result().expect("parse failed");
 
         assert_eq!(stmts.len(), 1);
-        match &stmts[0] {
+        match &stmts[0].node {
             Stmt::If { cond, then, else_ } => {
-                assert!(matches!(cond.as_ref(), Expr::BinOp(BinOp::Gt, _, _)));
+                // cond: &Box<Spanned<Expr>>, auto-deref to Spanned<Expr>
+                assert!(matches!(cond.node, Expr::BinOp(BinOp::Gt, _, _)));
                 assert_eq!(then.len(), 1);
                 assert!(else_.is_some());
                 assert_eq!(else_.as_ref().unwrap().len(), 1);
