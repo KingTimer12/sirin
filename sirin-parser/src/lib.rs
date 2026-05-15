@@ -33,7 +33,12 @@ mod tests {
         assert_eq!(stmts.len(), 2);
 
         match &stmts[0] {
-            Stmt::Fn { name, args, return_type, body } => {
+            Stmt::Fn {
+                name,
+                args,
+                return_type,
+                body,
+            } => {
                 assert_eq!(*name, "soma");
                 assert_eq!(args.len(), 2);
                 assert_eq!(args[0], ("a", Type::Int));
@@ -41,7 +46,9 @@ mod tests {
                 assert_eq!(*return_type, Some(Type::Int));
                 assert_eq!(body.len(), 1);
                 match &body[0] {
-                    Stmt::Return(Some(expr)) => {
+                    Stmt::Return {
+                        value: Some(expr), ..
+                    } => {
                         assert!(matches!(expr.as_ref(), Expr::BinOp(BinOp::Add, _, _)));
                     }
                     _ => panic!("expected return with binop"),
@@ -75,12 +82,23 @@ mod tests {
 
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
-            Stmt::Fn { name, args, return_type, body } => {
+            Stmt::Fn {
+                name,
+                args,
+                return_type,
+                body,
+            } => {
                 assert_eq!(*name, "noop");
                 assert_eq!(args[0], ("x", Type::Bool));
                 assert_eq!(*return_type, None);
                 assert_eq!(body.len(), 1);
-                assert!(matches!(body[0], Stmt::Return(None)));
+                assert!(matches!(
+                    body[0],
+                    Stmt::Return {
+                        value: None,
+                        cond: None
+                    }
+                ));
             }
             _ => panic!("expected fn declaration"),
         }
@@ -94,11 +112,15 @@ mod tests {
 
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
-            Stmt::Fn { name, args, body, .. } => {
+            Stmt::Fn {
+                name, args, body, ..
+            } => {
                 assert_eq!(*name, "dobro");
                 assert_eq!(args[0], ("x", Type::Int));
                 assert_eq!(body.len(), 1);
-                assert!(matches!(&body[0], Stmt::Return(Some(e)) if matches!(e.as_ref(), Expr::BinOp(BinOp::Add, _, _))));
+                assert!(
+                    matches!(&body[0], Stmt::Return { value: Some(e), .. } if matches!(e.as_ref(), Expr::BinOp(BinOp::Add, _, _)))
+                );
             }
             _ => panic!("expected fn declaration"),
         }

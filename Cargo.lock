@@ -252,6 +252,9 @@ dependencies = [
 name = "sirin-typechecker"
 version = "0.1.0"
 dependencies = [
+ "chumsky",
+ "logos",
+ "sirin-lexer",
  "sirin-parser",
 ]
 

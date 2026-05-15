@@ -110,7 +110,15 @@ pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Vec<Stmt<'a>>, Err<Simp
 
         let r#return = just(Tokens::Return)
             .ignore_then(expr.clone().or_not())
-            .map(|value| Stmt::Return(value.map(Box::new)));
+            .then(
+                just(Tokens::If)
+                    .ignore_then(expr.clone())
+                    .or_not()
+            )
+            .map(|(value, cond)| Stmt::Return {
+                value: value.map(Box::new),
+                cond:  cond.map(Box::new),
+            });
 
         let r#if = just(Tokens::If)
             .ignore_then(
@@ -142,7 +150,10 @@ pub fn parser<'a>() -> impl Parser<'a, &'a [Tokens<'a>], Vec<Stmt<'a>>, Err<Simp
         let fn_body = choice((
             just(Tokens::FatArrow)
                 .ignore_then(expr.clone())
-                .map(|body| vec![Stmt::Return(Some(Box::new(body)))]),
+                .map(|body| vec![Stmt::Return {
+                    value: Some(Box::new(body)),
+                    cond: None,
+                }]),
             decl.clone()
                 .repeated()
                 .collect::<Vec<_>>()

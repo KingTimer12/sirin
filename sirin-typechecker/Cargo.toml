@@ -5,3 +5,8 @@ edition.workspace = true
 
 [dependencies]
 sirin-parser = { workspace = true }
+
+[dev-dependencies]
+sirin-lexer = { workspace = true }
+chumsky    = { workspace = true }
+logos      = { workspace = true }

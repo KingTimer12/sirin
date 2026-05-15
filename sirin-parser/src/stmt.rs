@@ -12,7 +12,10 @@ pub enum Stmt<'a> {
         return_type: Option<Type>, 
         body: Vec<Stmt<'a>>,
     },
-    Return(Option<Box<Expr<'a>>>),
+    Return {
+        value: Option<Box<Expr<'a>>>,
+        cond:  Option<Box<Expr<'a>>>,
+    },
     Expr(Expr<'a>),
     If {
         cond: Box<Expr<'a>>,
