@@ -68,22 +68,26 @@ fn main() {
         .expect("clang not found — needed to build libtcc1");
     assert!(status.success(), "failed to compile libtcc1.c");
 
-    let status = std::process::Command::new("llvm-ar")
+    let ar_cmd = ["llvm-ar", "ar"]
+        .into_iter()
+        .find(|cmd| std::process::Command::new(cmd).arg("--version").output().is_ok())
+        .expect("no ar tool found — install LLVM tools or binutils");
+    let status = std::process::Command::new(ar_cmd)
         .args([
             "rcs",
             &libtcc1_a.display().to_string(),
             &libtcc1_obj.display().to_string(),
         ])
         .status()
-        .expect("llvm-ar not found — install LLVM tools");
+        .unwrap_or_else(|e| panic!("{ar_cmd} failed to start: {e}"));
     assert!(status.success(), "failed to create libtcc1.a");
 
     let out_fwd = out_dir.display().to_string().replace('\\', "/");
     println!("cargo:rustc-env=TCC_RUNTIME_DIR={}", out_fwd);
 
-    // oldnames.lib maps POSIX names (getcwd, open, read, …) to their
-    // underscore-prefixed MSVC equivalents (_getcwd, _open, _read, …)
-    println!("cargo:rustc-link-lib=oldnames");
+    if cfg!(target_os = "windows") {
+        println!("cargo:rustc-link-lib=oldnames");
+    }
 
     println!("cargo:rerun-if-changed=vendor/tinycc/libtcc.c");
     println!("cargo:rerun-if-changed=vendor/tinycc/tcc.h");
