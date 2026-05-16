@@ -1,0 +1,16 @@
+[package]
+name = "sirin-codegen-c"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sirin-parser       = { workspace = true }
+sirin-diagnostics  = { workspace = true }
+
+[dev-dependencies]
+sirin-lexer = { workspace = true }
+chumsky    = { workspace = true }
+logos      = { workspace = true }
+
+[build-dependencies]
+cc = "1"

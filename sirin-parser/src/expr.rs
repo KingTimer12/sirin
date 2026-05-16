@@ -11,6 +11,9 @@ pub enum Expr<'a> {
     Not(Box<Spanned<Expr<'a>>>),
     BinOp(BinOp, Box<Spanned<Expr<'a>>>, Box<Spanned<Expr<'a>>>),
     Call(&'a str, Vec<Spanned<Expr<'a>>>),
+    Array(Vec<Spanned<Expr<'a>>>),
+    Index(Box<Spanned<Expr<'a>>>, Box<Spanned<Expr<'a>>>),
+    MethodCall(Box<Spanned<Expr<'a>>>, &'a str, Vec<Spanned<Expr<'a>>>),
 }
 
 #[derive(Debug, Clone)]

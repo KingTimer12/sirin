@@ -82,11 +82,46 @@ pub enum Tokens<'a> {
     #[token("str")]
     StringType,
 
+    // Explicit integer types
+    #[token("u8")]
+    U8Type,
+    #[token("u16")]
+    U16Type,
+    #[token("u32")]
+    U32Type,
+    #[token("u64")]
+    U64Type,
+    #[token("i8")]
+    I8Type,
+    #[token("i16")]
+    I16Type,
+    #[token("i32")]
+    I32Type,
+    #[token("i64")]
+    I64Type,
+
+    // Collection types
+    #[token("Array")]
+    ArrayType,
+    #[token("Vec")]
+    VecType,
+    #[token("Map")]
+    MapType,
+    #[token("Set")]
+    SetType,
+
+    #[token(".")]
+    Dot,
+
     // Math and fn tokens
     #[token("(")]
     LParen,
     #[token(")")]
     RParen,
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
 
     #[regex(r"[0-9]+", |lex| {
         let s = lex.slice();

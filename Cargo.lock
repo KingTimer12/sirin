@@ -337,10 +337,23 @@ dependencies = [
  "chumsky",
  "clap",
  "logos",
+ "sirin-codegen-c",
  "sirin-diagnostics",
  "sirin-lexer",
  "sirin-parser",
  "sirin-typechecker",
+]
+
+[[package]]
+name = "sirin-codegen-c"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "chumsky",
+ "logos",
+ "sirin-diagnostics",
+ "sirin-lexer",
+ "sirin-parser",
 ]
 
 [[package]]
@@ -366,13 +379,6 @@ dependencies = [
  "logos",
  "sirin-diagnostics",
  "sirin-lexer",
-]
-
-[[package]]
-name = "sirin-runtime"
-version = "0.1.0"
-dependencies = [
- "logos",
 ]
 
 [[package]]

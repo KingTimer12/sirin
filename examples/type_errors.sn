@@ -1,0 +1,20 @@
+﻿arr = [1, 2, "b"]
+x = arr[0]
+
+v: Vec[u8] = Vec("a")
+v.push(42)
+y = v[0]
+
+m: Map[str, int] = Map()
+m.insert("idade", 25)
+z = m.get(6)
+
+m2: Map[str, int] = Map()
+m2.insert(6, 25)
+z2 = m2.get("idade")
+
+s: Set[int] = Set()
+s.insert(1)
+s.insert("a")
+s.insert(1)
+tem = s.contains(1)

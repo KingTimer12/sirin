@@ -8,6 +8,7 @@ sirin-parser       = { workspace = true }
 sirin-diagnostics  = { workspace = true }
 sirin-lexer        = { workspace = true }
 sirin-typechecker  = { workspace = true }
+sirin-codegen-c    = { workspace = true }
 clap               = { workspace = true }
 logos              = { workspace = true }
 chumsky            = { workspace = true }

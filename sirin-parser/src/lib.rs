@@ -67,7 +67,7 @@ mod tests {
         }
 
         match &stmts[1].node {
-            Stmt::Let { name, rhs } => {
+            Stmt::Let { name, rhs, .. } => {
                 assert_eq!(name.node, "x");
                 match &rhs.node {
                     Expr::Call(fn_name, args) => {

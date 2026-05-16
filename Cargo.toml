@@ -1,10 +1,18 @@
 [workspace]
-members = ["sirin-cli","sirin-diagnostics","sirin-lexer", "sirin-parser","sirin-runtime", "sirin-typechecker"]
+members = ["sirin-cli", "sirin-codegen-c", "sirin-diagnostics", "sirin-lexer", "sirin-parser", "sirin-typechecker"]
 resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+# chumsky/sirin-parser generate deeply nested generics that LLVM takes forever to
+# optimize at -O3. Cap them at -O1 to keep release builds tolerable.
+[profile.release.package.chumsky]
+opt-level = 1
+
+[profile.release.package.sirin-parser]
+opt-level = 1
 
 [workspace.dependencies]
 ariadne = "0.6.0"
@@ -16,3 +24,4 @@ sirin-lexer = { path = "sirin-lexer" }
 sirin-parser = { path = "sirin-parser" }
 sirin-diagnostics = { path = "sirin-diagnostics" }
 sirin-typechecker = { path = "sirin-typechecker" }
+sirin-codegen-c = { path = "sirin-codegen-c" }

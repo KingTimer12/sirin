@@ -1,7 +1,0 @@
-[package]
-name = "sirin-runtime"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-logos = { workspace = true }

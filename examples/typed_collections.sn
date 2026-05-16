@@ -1,0 +1,11 @@
+﻿v: Vec[u8] = Vec(4)
+v.push(10)
+v.push(20)
+y = v[0]
+
+arr: Array[i32] = [100, 200, 300]
+x = arr[1]
+
+s: Set[u16] = Set()
+s.insert(5)
+tem = s.contains(5)

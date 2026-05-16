@@ -1,0 +1,2 @@
+[package.metadata.rust-analyzer]
+rustc_source = "discover"

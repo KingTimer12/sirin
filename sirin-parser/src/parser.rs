@@ -38,12 +38,56 @@ pub fn parser<'a>()
         .clone()
         .map_with(|n, extra| Spanned::new(n, sp(extra.span())));
 
-    let ty = choice((
+    // Boxed: erases 12-branch choice type so rustc stops re-proving Parser on each use
+    let ty_atom = choice((
         just(Tokens::IntType).to(Type::Int),
         just(Tokens::FloatType).to(Type::Float),
         just(Tokens::StringType).to(Type::Str),
         just(Tokens::BoolType).to(Type::Bool),
-    ));
+        just(Tokens::U8Type).to(Type::U8),
+        just(Tokens::U16Type).to(Type::U16),
+        just(Tokens::U32Type).to(Type::U32),
+        just(Tokens::U64Type).to(Type::U64),
+        just(Tokens::I8Type).to(Type::I8),
+        just(Tokens::I16Type).to(Type::I16),
+        just(Tokens::I32Type).to(Type::I32),
+        just(Tokens::I64Type).to(Type::I64),
+    )).boxed();
+
+    // Boxed: cloned 3 times (Array/Vec/Set) — Arc clone, O(1)
+    let bracket = ty_atom
+        .clone()
+        .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket))
+        .boxed();
+
+    let map_bracket = ty_atom
+        .clone()
+        .then_ignore(just(Tokens::Comma))
+        .then(ty_atom.clone())
+        .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket));
+
+    // Boxed: used in arg and return-type positions; stops type from infecting stmt chain
+    let ty = choice((
+        just(Tokens::ArrayType)
+            .ignore_then(bracket.clone())
+            .map(|t| Type::Array(Box::new(t))),
+        just(Tokens::VecType)
+            .ignore_then(bracket.clone())
+            .map(|t| Type::Vec(Box::new(t))),
+        just(Tokens::SetType)
+            .ignore_then(bracket.clone())
+            .map(|t| Type::Set(Box::new(t))),
+        just(Tokens::MapType)
+            .ignore_then(map_bracket)
+            .map(|(k, v)| Type::Map(Box::new(k), Box::new(v))),
+        ty_atom,
+    )).boxed();
+
+    // Postfix ops collected per-token; stored with their span for correct tree spans
+    enum Postfix<'b> {
+        Index(Spanned<Expr<'b>>, Span),
+        Method(&'b str, Vec<Spanned<Expr<'b>>>, Span),
+    }
 
     let expr = recursive(|p| {
         let call = ident_name
@@ -55,6 +99,7 @@ pub fn parser<'a>()
             )
             .map_with(|(name, args), extra| Spanned::new(Expr::Call(name, args), sp(extra.span())));
 
+        // Boxed: 8-branch or-chain; type doubles with each .or()
         let atom = {
             let parenthesized = p
                 .clone()
@@ -70,16 +115,81 @@ pub fn parser<'a>()
                 .map_with(|e, extra| Spanned::new(e, sp(extra.span())));
             let ident = ident_expr.map_with(|e, extra| Spanned::new(e, sp(extra.span())));
 
-            parenthesized
+            // Array literal: [expr, expr, ...]
+            let array_lit = p
+                .clone()
+                .separated_by(just(Tokens::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket))
+                .map_with(|items, extra| Spanned::new(Expr::Array(items), sp(extra.span())));
+
+            // Collection constructors: Vec(n), Map(), Set(), Array(n)
+            // These use reserved type-keyword tokens, not Ident, so need separate parsers.
+            let ctor_args = || {
+                p.clone()
+                    .separated_by(just(Tokens::Comma))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen))
+            };
+            let vec_ctor = just(Tokens::VecType)
+                .ignore_then(ctor_args())
+                .map_with(|a, e| Spanned::new(Expr::Call("Vec", a), sp(e.span())));
+            let map_ctor = just(Tokens::MapType)
+                .ignore_then(ctor_args())
+                .map_with(|a, e| Spanned::new(Expr::Call("Map", a), sp(e.span())));
+            let set_ctor = just(Tokens::SetType)
+                .ignore_then(ctor_args())
+                .map_with(|a, e| Spanned::new(Expr::Call("Set", a), sp(e.span())));
+            let array_ctor = just(Tokens::ArrayType)
+                .ignore_then(ctor_args())
+                .map_with(|a, e| Spanned::new(Expr::Call("Array", a), sp(e.span())));
+
+            array_lit
+                .or(parenthesized)
                 .or(integer)
                 .or(float)
                 .or(string)
                 .or(boolean)
+                .or(vec_ctor)
+                .or(map_ctor)
+                .or(set_ctor)
+                .or(array_ctor)
                 .or(call)
                 .or(ident)
-        };
+        }.boxed();
 
-        atom.pratt((
+        // Postfix: index [expr] and method call .name(args), left-associative
+        let postfix_index = p
+            .clone()
+            .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket))
+            .map_with(|idx, extra| Postfix::Index(idx, sp(extra.span())));
+
+        let postfix_method = just(Tokens::Dot)
+            .ignore_then(ident_name.clone())
+            .then(
+                p.clone()
+                    .separated_by(just(Tokens::Comma))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+            )
+            .map_with(|(name, args), extra| Postfix::Method(name, args, sp(extra.span())));
+
+        let primary = atom
+            .then(postfix_index.or(postfix_method).repeated().collect::<Vec<_>>())
+            .map(|(base, ops)| {
+                ops.into_iter().fold(base, |acc, op| match op {
+                    Postfix::Index(idx, span) => {
+                        Spanned::new(Expr::Index(Box::new(acc), Box::new(idx)), span)
+                    }
+                    Postfix::Method(name, args, span) => {
+                        Spanned::new(Expr::MethodCall(Box::new(acc), name, args), span)
+                    }
+                })
+            })
+            .boxed();
+
+        primary.pratt((
             prefix(6, just(Tokens::Minus), |_, rhs, extra| {
                 Spanned::new(Expr::Neg(Box::new(rhs)), sp(extra.span()))
             }),
@@ -162,17 +272,39 @@ pub fn parser<'a>()
     });
 
     let stmt = recursive(|decl| {
+        // name: Type = expr
+        let typed_var = spanned_name
+            .clone()
+            .then_ignore(just(Tokens::Colon))
+            .then(ty.clone())
+            .then_ignore(just(Tokens::Assign))
+            .then(expr.clone())
+            .map_with(|((name, ty), rhs), extra| {
+                Spanned::new(Stmt::Let { name, ty: Some(ty), rhs }, sp(extra.span()))
+            });
+
+        // name: Type := expr
+        let typed_copy_var = spanned_name
+            .clone()
+            .then_ignore(just(Tokens::Colon))
+            .then(ty.clone())
+            .then_ignore(just(Tokens::ColonAssign))
+            .then(expr.clone())
+            .map_with(|((name, ty), rhs), extra| {
+                Spanned::new(Stmt::CopyLet { name, ty: Some(ty), rhs }, sp(extra.span()))
+            });
+
         let var = spanned_name
             .clone()
             .then_ignore(just(Tokens::Assign))
             .then(expr.clone())
-            .map_with(|(name, rhs), extra| Spanned::new(Stmt::Let { name, rhs }, sp(extra.span())));
+            .map_with(|(name, rhs), extra| Spanned::new(Stmt::Let { name, ty: None, rhs }, sp(extra.span())));
 
         let copy_var = spanned_name
             .clone()
             .then_ignore(just(Tokens::ColonAssign))
             .then(expr.clone())
-            .map_with(|(name, rhs), extra| Spanned::new(Stmt::CopyLet { name, rhs }, sp(extra.span())));
+            .map_with(|(name, rhs), extra| Spanned::new(Stmt::CopyLet { name, ty: None, rhs }, sp(extra.span())));
 
         let r#return = just(Tokens::Return)
             .ignore_then(expr.clone().or_not())
@@ -263,9 +395,11 @@ pub fn parser<'a>()
                 )
             });
 
-        copy_var.or(var).or(r#return).or(r#if).or(r#fn).or(expr
+        // Boxed: prevents exponential type growth per stmt variant.
+        // typed_* must precede untyped — both start with ident, disambiguated by ':' vs '='/'  :='
+        typed_copy_var.or(typed_var).or(copy_var).or(var).or(r#return).or(r#if).or(r#fn).or(expr
             .clone()
-            .map_with(|e, extra| Spanned::new(Stmt::Expr(e), sp(extra.span()))))
+            .map_with(|e, extra| Spanned::new(Stmt::Expr(e), sp(extra.span())))).boxed()
     });
 
     stmt.repeated().collect::<Vec<_>>().then_ignore(end())

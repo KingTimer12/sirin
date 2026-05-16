@@ -1,0 +1,3 @@
+[submodule "sirin-codegen-c/vendor/tinycc"]
+	path = sirin-codegen-c/vendor/tinycc
+	url = https://github.com/TinyCC/tinycc

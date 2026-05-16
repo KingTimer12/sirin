@@ -4,10 +4,12 @@ use crate::{expr::Expr, span::Spanned, types::Type};
 pub enum Stmt<'a> {
     Let {
         name: Spanned<&'a str>,
+        ty:   Option<Type>,
         rhs:  Spanned<Expr<'a>>,
     },
     CopyLet {
         name: Spanned<&'a str>,
+        ty:   Option<Type>,
         rhs:  Spanned<Expr<'a>>,
     },
     Fn {
