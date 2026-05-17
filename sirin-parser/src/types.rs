@@ -21,6 +21,8 @@ pub enum Type {
     Vec(Box<Type>),
     Map(Box<Type>, Box<Type>),
     Set(Box<Type>),
+    // user-defined class/struct types
+    Named(String),
 }
 
 impl Type {

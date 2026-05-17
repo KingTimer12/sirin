@@ -15,7 +15,7 @@ use sirin_lexer::token::Tokens;
 use crate::{
     expr::{BinOp, Expr},
     span::Spanned,
-    stmt::Stmt,
+    stmt::{ClassField, InterfaceMethod, Stmt},
     types::Type,
 };
 
@@ -67,6 +67,7 @@ pub fn parser<'a>()
         .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket));
 
     // Boxed: used in arg and return-type positions; stops type from infecting stmt chain
+    // Named added as fallback for user-defined class types (any remaining Ident)
     let ty = choice((
         just(Tokens::ArrayType)
             .ignore_then(bracket.clone())
@@ -81,15 +82,18 @@ pub fn parser<'a>()
             .ignore_then(map_bracket)
             .map(|(k, v)| Type::Map(Box::new(k), Box::new(v))),
         ty_atom,
+        ident_name.clone().map(|n: &str| Type::Named(n.to_string())),
     )).boxed();
 
     // Postfix ops collected per-token; stored with their span for correct tree spans
     enum Postfix<'b> {
         Index(Spanned<Expr<'b>>, Span),
+        Field(&'b str, Span),
         Method(&'b str, Vec<Spanned<Expr<'b>>>, Span),
     }
 
     let expr = recursive(|p| {
+        // call/new: uppercase ident(args) → New/NewDefault; lowercase → Call
         let call = ident_name
             .then(
                 p.clone()
@@ -97,7 +101,15 @@ pub fn parser<'a>()
                     .collect::<Vec<_>>()
                     .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
             )
-            .map_with(|(name, args), extra| Spanned::new(Expr::Call(name, args), sp(extra.span())));
+            .map_with(|(name, args), extra| {
+                let is_upper = name.chars().next().map_or(false, |c| c.is_uppercase());
+                let e = if is_upper {
+                    if args.is_empty() { Expr::NewDefault(name) } else { Expr::New(name, args) }
+                } else {
+                    Expr::Call(name, args)
+                };
+                Spanned::new(e, sp(extra.span()))
+            });
 
         // Boxed: 8-branch or-chain; type doubles with each .or()
         let atom = {
@@ -115,6 +127,10 @@ pub fn parser<'a>()
                 .map_with(|e, extra| Spanned::new(e, sp(extra.span())));
             let ident = ident_expr.map_with(|e, extra| Spanned::new(e, sp(extra.span())));
 
+            // self keyword parsed as Expr::Var("self") inside methods
+            let self_expr = just(Tokens::SelfKw)
+                .map_with(|_, extra| Spanned::new(Expr::Var("self"), sp(extra.span())));
+
             // Array literal: [expr, expr, ...]
             let array_lit = p
                 .clone()
@@ -124,8 +140,24 @@ pub fn parser<'a>()
                 .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket))
                 .map_with(|items, extra| Spanned::new(Expr::Array(items), sp(extra.span())));
 
+            // Struct-literal init: ClassName { field: val, ... }
+            let new_fields = ident_name
+                .clone()
+                .then(
+                    ident_name
+                        .clone()
+                        .then_ignore(just(Tokens::Colon))
+                        .then(p.clone())
+                        .separated_by(just(Tokens::Comma))
+                        .allow_trailing()
+                        .collect::<Vec<_>>()
+                        .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+                )
+                .map_with(|(name, fields), extra| {
+                    Spanned::new(Expr::NewFields(name, fields), sp(extra.span()))
+                });
+
             // Collection constructors: Vec(n), Map(), Set(), Array(n)
-            // These use reserved type-keyword tokens, not Ident, so need separate parsers.
             let ctor_args = || {
                 p.clone()
                     .separated_by(just(Tokens::Comma))
@@ -145,6 +177,7 @@ pub fn parser<'a>()
                 .ignore_then(ctor_args())
                 .map_with(|a, e| Spanned::new(Expr::Call("Array", a), sp(e.span())));
 
+            // new_fields before call so Ident { } is tried before Ident ()
             array_lit
                 .or(parenthesized)
                 .or(integer)
@@ -155,16 +188,19 @@ pub fn parser<'a>()
                 .or(map_ctor)
                 .or(set_ctor)
                 .or(array_ctor)
+                .or(new_fields)
                 .or(call)
+                .or(self_expr)
                 .or(ident)
         }.boxed();
 
-        // Postfix: index [expr] and method call .name(args), left-associative
+        // Postfix: index [expr] and method/field .name[(args)], left-associative
         let postfix_index = p
             .clone()
             .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket))
             .map_with(|idx, extra| Postfix::Index(idx, sp(extra.span())));
 
+        // method tried before field: .name(args) vs .name
         let postfix_method = just(Tokens::Dot)
             .ignore_then(ident_name.clone())
             .then(
@@ -175,8 +211,12 @@ pub fn parser<'a>()
             )
             .map_with(|(name, args), extra| Postfix::Method(name, args, sp(extra.span())));
 
+        let postfix_field = just(Tokens::Dot)
+            .ignore_then(ident_name.clone())
+            .map_with(|name, extra| Postfix::Field(name, sp(extra.span())));
+
         let primary = atom
-            .then(postfix_index.or(postfix_method).repeated().collect::<Vec<_>>())
+            .then(postfix_index.or(postfix_method).or(postfix_field).repeated().collect::<Vec<_>>())
             .map(|(base, ops)| {
                 ops.into_iter().fold(base, |acc, op| match op {
                     Postfix::Index(idx, span) => {
@@ -184,6 +224,9 @@ pub fn parser<'a>()
                     }
                     Postfix::Method(name, args, span) => {
                         Spanned::new(Expr::MethodCall(Box::new(acc), name, args), span)
+                    }
+                    Postfix::Field(name, span) => {
+                        Spanned::new(Expr::FieldAccess(Box::new(acc), name), span)
                     }
                 })
             })
@@ -298,13 +341,17 @@ pub fn parser<'a>()
             .clone()
             .then_ignore(just(Tokens::Assign))
             .then(expr.clone())
-            .map_with(|(name, rhs), extra| Spanned::new(Stmt::Let { name, ty: None, rhs }, sp(extra.span())));
+            .map_with(|(name, rhs), extra| {
+                Spanned::new(Stmt::Let { name, ty: None, rhs }, sp(extra.span()))
+            });
 
         let copy_var = spanned_name
             .clone()
             .then_ignore(just(Tokens::ColonAssign))
             .then(expr.clone())
-            .map_with(|(name, rhs), extra| Spanned::new(Stmt::CopyLet { name, ty: None, rhs }, sp(extra.span())));
+            .map_with(|(name, rhs), extra| {
+                Spanned::new(Stmt::CopyLet { name, ty: None, rhs }, sp(extra.span()))
+            });
 
         let r#return = just(Tokens::Return)
             .ignore_then(expr.clone().or_not())
@@ -377,12 +424,13 @@ pub fn parser<'a>()
         let r#fn = just(Tokens::Fn)
             .ignore_then(spanned_name.clone())
             .then(
-                arg.separated_by(just(Tokens::Comma))
+                arg.clone()
+                    .separated_by(just(Tokens::Comma))
                     .collect::<Vec<_>>()
                     .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
             )
             .then(just(Tokens::Arrow).ignore_then(ty.clone()).or_not())
-            .then(fn_body)
+            .then(fn_body.clone())
             .map_with(|(((name, args), return_type), body), extra| {
                 Spanned::new(
                     Stmt::Fn {
@@ -395,11 +443,187 @@ pub fn parser<'a>()
                 )
             });
 
+        // ── Class body items ──────────────────────────────────────────────────
+
+        #[allow(dead_code)]
+        enum ClassItem<'b> {
+            Field(ClassField<'b>),
+            Method(Spanned<Stmt<'b>>),
+        }
+
+        // mut field
+        let class_field_mut = just(Tokens::Mut)
+            .ignore_then(spanned_name.clone())
+            .then_ignore(just(Tokens::Colon))
+            .then(ty.clone())
+            .map(|(name, field_ty)| {
+                let private = name.node.starts_with('_');
+                ClassItem::Field(ClassField { name, ty: field_ty, mutable: true, private })
+            });
+
+        // immutable field
+        let class_field_imm = spanned_name
+            .clone()
+            .then_ignore(just(Tokens::Colon))
+            .then(ty.clone())
+            .map(|(name, field_ty)| {
+                let private = name.node.starts_with('_');
+                ClassItem::Field(ClassField { name, ty: field_ty, mutable: false, private })
+            });
+
+        // abstract fn name(args) -> ret   (no body)
+        let abstract_fn = just(Tokens::Abstract)
+            .ignore_then(just(Tokens::Fn))
+            .ignore_then(spanned_name.clone())
+            .then(
+                arg.clone()
+                    .separated_by(just(Tokens::Comma))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+            )
+            .then(just(Tokens::Arrow).ignore_then(ty.clone()).or_not())
+            .map_with(|((name, args), return_type), extra| {
+                ClassItem::Method(Spanned::new(
+                    Stmt::AbstractFn { name, args, return_type },
+                    sp(extra.span()),
+                ))
+            });
+
+        // init(args) { body }
+        let init_item = just(Tokens::Init)
+            .ignore_then(
+                arg.clone()
+                    .separated_by(just(Tokens::Comma))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+            )
+            .then(
+                decl.clone()
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+            )
+            .map_with(|(args, body), extra| {
+                ClassItem::Method(Spanned::new(Stmt::Init { args, body }, sp(extra.span())))
+            });
+
+        // default { body }
+        let default_item = just(Tokens::Default)
+            .ignore_then(
+                decl.clone()
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+            )
+            .map_with(|body, extra| {
+                ClassItem::Method(Spanned::new(Stmt::Default { body }, sp(extra.span())))
+            });
+
+        // regular fn in class body (uses fn_body — last use)
+        let class_fn = just(Tokens::Fn)
+            .ignore_then(spanned_name.clone())
+            .then(
+                arg.clone()
+                    .separated_by(just(Tokens::Comma))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+            )
+            .then(just(Tokens::Arrow).ignore_then(ty.clone()).or_not())
+            .then(fn_body)
+            .map_with(|(((name, args), return_type), body), extra| {
+                ClassItem::Method(Spanned::new(
+                    Stmt::Fn { name, args, return_type, body },
+                    sp(extra.span()),
+                ))
+            });
+
+        // keywords-first order; field_mut before field_imm to avoid consuming mut as ident
+        let class_item = abstract_fn
+            .or(class_fn)
+            .or(init_item)
+            .or(default_item)
+            .or(class_field_mut)
+            .or(class_field_imm);
+
+        // [abstract] class Name [extends P] [implements I1, I2] { items }
+        let class_stmt = choice((
+            just(Tokens::Abstract).then_ignore(just(Tokens::Class)).to(true),
+            just(Tokens::Class).to(false),
+        ))
+        .then(spanned_name.clone())
+        .then(just(Tokens::Extends).ignore_then(spanned_name.clone()).or_not())
+        .then(
+            just(Tokens::Implements)
+                .ignore_then(
+                    spanned_name
+                        .clone()
+                        .separated_by(just(Tokens::Comma))
+                        .collect::<Vec<_>>(),
+                )
+                .or_not()
+                .map(|opt| opt.unwrap_or_default()),
+        )
+        .then(
+            class_item
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+        )
+        .map_with(|((((abstract_, name), extends), implements), items), extra| {
+            let mut fields  = vec![];
+            let mut methods = vec![];
+            for item in items {
+                match item {
+                    ClassItem::Field(f)  => fields.push(f),
+                    ClassItem::Method(m) => methods.push(m),
+                }
+            }
+            Spanned::new(
+                Stmt::Class { name, abstract_, extends, implements, fields, methods },
+                sp(extra.span()),
+            )
+        });
+
+        // ── Interface ────────────────────────────────────────────────────────
+
+        let interface_method = just(Tokens::Fn)
+            .ignore_then(spanned_name.clone())
+            .then(
+                arg.clone()
+                    .separated_by(just(Tokens::Comma))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+            )
+            .then(just(Tokens::Arrow).ignore_then(ty.clone()).or_not())
+            .map(|((name, args), return_type)| InterfaceMethod { name, args, return_type });
+
+        let interface_stmt = just(Tokens::Interface)
+            .ignore_then(spanned_name.clone())
+            .then(
+                interface_method
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+            )
+            .map_with(|(name, methods), extra| {
+                Spanned::new(Stmt::Interface { name, methods }, sp(extra.span()))
+            });
+
         // Boxed: prevents exponential type growth per stmt variant.
         // typed_* must precede untyped — both start with ident, disambiguated by ':' vs '='/'  :='
-        typed_copy_var.or(typed_var).or(copy_var).or(var).or(r#return).or(r#if).or(r#fn).or(expr
-            .clone()
-            .map_with(|e, extra| Spanned::new(Stmt::Expr(e), sp(extra.span())))).boxed()
+        typed_copy_var
+            .or(typed_var)
+            .or(copy_var)
+            .or(var)
+            .or(r#return)
+            .or(r#if)
+            .or(r#fn)
+            .or(class_stmt)
+            .or(interface_stmt)
+            .or(expr
+                .clone()
+                .map_with(|e, extra| Spanned::new(Stmt::Expr(e), sp(extra.span()))))
+            .boxed()
     });
 
     stmt.repeated().collect::<Vec<_>>().then_ignore(end())

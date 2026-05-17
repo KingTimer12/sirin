@@ -25,3 +25,15 @@ sirin-parser = { path = "sirin-parser" }
 sirin-diagnostics = { path = "sirin-diagnostics" }
 sirin-typechecker = { path = "sirin-typechecker" }
 sirin-codegen-c = { path = "sirin-codegen-c" }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.release-debug]
+inherits = "release"
+strip = false
+debug = true

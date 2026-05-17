@@ -1,0 +1,19 @@
+class Animal {
+    nome: str
+    mut count: u8
+
+    default {
+        count = 0
+    }
+
+    init(n: str) {
+        nome = n
+        count = 0
+    }
+
+    fn descrever() -> str => nome
+}
+
+a: Animal = Animal("Rex")
+b: Animal = Animal()
+c: Animal = Animal { nome: "Fido" }

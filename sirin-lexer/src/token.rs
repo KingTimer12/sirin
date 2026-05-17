@@ -51,6 +51,26 @@ pub enum Tokens<'a> {
     #[token("/")]
     Divide,
 
+    // Class / OOP keywords
+    #[token("class")]
+    Class,
+    #[token("abstract")]
+    Abstract,
+    #[token("extends")]
+    Extends,
+    #[token("implements")]
+    Implements,
+    #[token("interface")]
+    Interface,
+    #[token("init")]
+    Init,
+    #[token("default")]
+    Default,
+    #[token("mut")]
+    Mut,
+    #[token("self")]
+    SelfKw,
+
     // Function tokens
     #[token("fn")]
     Fn,

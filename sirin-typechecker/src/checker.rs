@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use sirin_diagnostics::report_error;
 use sirin_parser::{
     expr::{BinOp, Expr},
@@ -8,14 +10,38 @@ use sirin_parser::{
 
 use crate::{env::{Env, OwnershipState}, error::CheckerError};
 
+// ── Class registry ────────────────────────────────────────────────────────────
+
+struct FieldInfo {
+    ty: Type,
+}
+
+struct MethodInfo {
+    return_type: Type,
+}
+
+struct ClassInfo {
+    fields: Vec<(String, FieldInfo)>,  // ordered
+    methods: HashMap<String, MethodInfo>,
+}
+
+impl ClassInfo {
+    fn field_type(&self, name: &str) -> Option<&Type> {
+        self.fields.iter().find(|(n, _)| n.as_str() == name).map(|(_, f)| &f.ty)
+    }
+}
+
+// ── Checker ───────────────────────────────────────────────────────────────────
+
 pub struct Checker<'a> {
     pub src: &'a str,
     pub(crate) env: Env<'a>,
+    classes: HashMap<String, ClassInfo>,
 }
 
 impl<'a> Checker<'a> {
     pub fn new(src: &'a str) -> Self {
-        Self { src, env: Env::new() }
+        Self { src, env: Env::new(), classes: HashMap::new() }
     }
 
     pub fn check_stmt(&mut self, stmt: &Spanned<Stmt<'a>>) -> Result<(), CheckerError<'a>> {
@@ -37,7 +63,9 @@ impl<'a> Checker<'a> {
                             let ok = rhs_ty == *decl
                                 || (decl.is_integer() && rhs_ty.is_integer())
                                 || rhs_ty == Type::Void
-                                || coll_compat;
+                                || coll_compat
+                                // Named types: allow when names match
+                                || matches!((&rhs_ty, decl), (Type::Named(a), Type::Named(b)) if a == b);
                             if !ok {
                                 self.env.define(name.node, Type::Void);
                                 return Err(CheckerError::TypeError(decl.clone(), rhs_ty));
@@ -160,6 +188,85 @@ impl<'a> Checker<'a> {
                 self.check_expr(expr)?;
                 Ok(())
             }
+
+            // ── Class declaration ─────────────────────────────────────────────
+            Stmt::Class { name, fields, methods, .. } => {
+                let class_name = name.node;
+
+                // Register with fields first (methods resolved after)
+                self.classes.insert(class_name.to_string(), ClassInfo {
+                    fields: fields.iter()
+                        .map(|f| (f.name.node.to_string(), FieldInfo { ty: f.ty.clone() }))
+                        .collect(),
+                    methods: HashMap::new(),
+                });
+
+                let mut method_infos: HashMap<String, MethodInfo> = HashMap::new();
+
+                for method_stmt in methods {
+                    match &method_stmt.node {
+                        Stmt::Fn { name: mname, args, return_type, body } => {
+                            self.env.push_scope();
+                            self.env.define("self", Type::Named(class_name.to_string()));
+                            for f in fields {
+                                self.env.define(f.name.node, f.ty.clone());
+                            }
+                            for (aname, aty) in args {
+                                self.env.define(aname.node, aty.clone());
+                            }
+                            self.env.set_return(return_type.clone());
+                            for s in body {
+                                self.check_stmt(s)?;
+                            }
+                            self.env.pop_scope();
+                            self.env.set_return(None);
+                            method_infos.insert(mname.node.to_string(), MethodInfo {
+                                return_type: return_type.clone().unwrap_or(Type::Void),
+                            });
+                        }
+                        Stmt::Init { args, body } => {
+                            self.env.push_scope();
+                            self.env.define("self", Type::Named(class_name.to_string()));
+                            for f in fields {
+                                self.env.define(f.name.node, f.ty.clone());
+                            }
+                            for (aname, aty) in args {
+                                self.env.define(aname.node, aty.clone());
+                            }
+                            for s in body {
+                                self.check_stmt(s)?;
+                            }
+                            self.env.pop_scope();
+                        }
+                        Stmt::Default { body } => {
+                            self.env.push_scope();
+                            self.env.define("self", Type::Named(class_name.to_string()));
+                            for f in fields {
+                                self.env.define(f.name.node, f.ty.clone());
+                            }
+                            for s in body {
+                                self.check_stmt(s)?;
+                            }
+                            self.env.pop_scope();
+                        }
+                        Stmt::AbstractFn { name: mname, return_type, .. } => {
+                            method_infos.insert(mname.node.to_string(), MethodInfo {
+                                return_type: return_type.clone().unwrap_or(Type::Void),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
+                if let Some(ci) = self.classes.get_mut(class_name) {
+                    ci.methods = method_infos;
+                }
+                Ok(())
+            }
+
+            Stmt::Interface { .. } => Ok(()),
+
+            _ => Ok(()),
         }
     }
 
@@ -407,11 +514,43 @@ impl<'a> Checker<'a> {
                             Ok(Type::Void)
                         }
                     },
+                    // User-defined class method calls
+                    Type::Named(cls) => {
+                        for arg in args { self.check_expr(arg)?; }
+                        if let Some(class_info) = self.classes.get(cls.as_str()) {
+                            if let Some(mi) = class_info.methods.get(*method) {
+                                return Ok(mi.return_type.clone());
+                            }
+                        }
+                        Ok(Type::Void)
+                    }
                     _ => {
                         for arg in args { self.check_expr(arg)?; }
                         Ok(Type::Void)
                     }
                 }
+            }
+
+            // ── Class / OOP expressions ───────────────────────────────────────
+            Expr::FieldAccess(obj, field) => {
+                let obj_ty = self.check_expr(obj)?;
+                if let Type::Named(cls) = &obj_ty {
+                    if let Some(class_info) = self.classes.get(cls.as_str()) {
+                        if let Some(ty) = class_info.field_type(field) {
+                            return Ok(ty.clone());
+                        }
+                    }
+                }
+                Ok(Type::Void)
+            }
+            Expr::New(name, args) => {
+                for arg in args { self.check_expr(arg)?; }
+                Ok(Type::Named(name.to_string()))
+            }
+            Expr::NewDefault(name) => Ok(Type::Named(name.to_string())),
+            Expr::NewFields(name, fields) => {
+                for (_, val) in fields { self.check_expr(val)?; }
+                Ok(Type::Named(name.to_string()))
             }
         }
     }

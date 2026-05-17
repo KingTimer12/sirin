@@ -14,6 +14,10 @@ pub enum Expr<'a> {
     Array(Vec<Spanned<Expr<'a>>>),
     Index(Box<Spanned<Expr<'a>>>, Box<Spanned<Expr<'a>>>),
     MethodCall(Box<Spanned<Expr<'a>>>, &'a str, Vec<Spanned<Expr<'a>>>),
+    FieldAccess(Box<Spanned<Expr<'a>>>, &'a str),
+    New(&'a str, Vec<Spanned<Expr<'a>>>),
+    NewDefault(&'a str),
+    NewFields(&'a str, Vec<(&'a str, Spanned<Expr<'a>>)>),
 }
 
 #[derive(Debug, Clone)]

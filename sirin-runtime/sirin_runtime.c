@@ -73,18 +73,42 @@ void sirin_vec_##FuncName##_free(SirinVec##TypeName* v) {                      \
     free(v->ptr); v->ptr = NULL; v->len = 0; v->cap = 0;                       \
 }
 
+#ifdef SIRIN_USE_VEC_INT
 SIRIN_VEC_IMPL(Int,   int,   int64_t)
+#endif
+#ifdef SIRIN_USE_VEC_U8
 SIRIN_VEC_IMPL(U8,    u8,    uint8_t)
+#endif
+#ifdef SIRIN_USE_VEC_U16
 SIRIN_VEC_IMPL(U16,   u16,   uint16_t)
+#endif
+#ifdef SIRIN_USE_VEC_U32
 SIRIN_VEC_IMPL(U32,   u32,   uint32_t)
+#endif
+#ifdef SIRIN_USE_VEC_U64
 SIRIN_VEC_IMPL(U64,   u64,   uint64_t)
+#endif
+#ifdef SIRIN_USE_VEC_I8
 SIRIN_VEC_IMPL(I8,    i8,    int8_t)
+#endif
+#ifdef SIRIN_USE_VEC_I16
 SIRIN_VEC_IMPL(I16,   i16,   int16_t)
+#endif
+#ifdef SIRIN_USE_VEC_I32
 SIRIN_VEC_IMPL(I32,   i32,   int32_t)
+#endif
+#ifdef SIRIN_USE_VEC_I64
 SIRIN_VEC_IMPL(I64,   i64,   int64_t)
+#endif
+#ifdef SIRIN_USE_VEC_FLOAT
 SIRIN_VEC_IMPL(Float, float, double)
+#endif
+#ifdef SIRIN_USE_VEC_BOOL
 SIRIN_VEC_IMPL(Bool,  bool,  int)
+#endif
+#ifdef SIRIN_USE_VEC_STR
 SIRIN_VEC_IMPL(Str,   str,   SirinCStr)
+#endif
 
 /* ── Array impl macro ─────────────────────────────────────────────────────── */
 
@@ -114,18 +138,39 @@ void sirin_array_##FuncName##_free(SirinArray##TypeName* v) {                   
     free(v->ptr); v->ptr = NULL; v->len = 0; v->cap = 0;                          \
 }
 
+#ifdef SIRIN_USE_ARRAY_INT
 SIRIN_ARRAY_IMPL(Int,   int,   int64_t)
+#endif
+#ifdef SIRIN_USE_ARRAY_U8
 SIRIN_ARRAY_IMPL(U8,    u8,    uint8_t)
+#endif
+#ifdef SIRIN_USE_ARRAY_U16
 SIRIN_ARRAY_IMPL(U16,   u16,   uint16_t)
+#endif
+#ifdef SIRIN_USE_ARRAY_U32
 SIRIN_ARRAY_IMPL(U32,   u32,   uint32_t)
+#endif
+#ifdef SIRIN_USE_ARRAY_U64
 SIRIN_ARRAY_IMPL(U64,   u64,   uint64_t)
+#endif
+#ifdef SIRIN_USE_ARRAY_I8
 SIRIN_ARRAY_IMPL(I8,    i8,    int8_t)
+#endif
+#ifdef SIRIN_USE_ARRAY_I16
 SIRIN_ARRAY_IMPL(I16,   i16,   int16_t)
+#endif
+#ifdef SIRIN_USE_ARRAY_I32
 SIRIN_ARRAY_IMPL(I32,   i32,   int32_t)
+#endif
+#ifdef SIRIN_USE_ARRAY_I64
 SIRIN_ARRAY_IMPL(I64,   i64,   int64_t)
+#endif
+#ifdef SIRIN_USE_ARRAY_FLOAT
 SIRIN_ARRAY_IMPL(Float, float, double)
+#endif
+#ifdef SIRIN_USE_ARRAY_BOOL
 SIRIN_ARRAY_IMPL(Bool,  bool,  int)
-SIRIN_ARRAY_IMPL(Str,   str,   SirinCStr)
+#endif
 
 /* ── Set impl macro (== comparison; inlines contains inside insert) ─────────  */
 
@@ -151,17 +196,39 @@ void sirin_set_##FuncName##_free(SirinSet##TypeName* s) {                       
     free(s->ptr); s->ptr = NULL; s->len = 0; s->cap = 0;                          \
 }
 
+#ifdef SIRIN_USE_SET_INT
 SIRIN_SET_IMPL(Int,   int,   int64_t)
+#endif
+#ifdef SIRIN_USE_SET_U8
 SIRIN_SET_IMPL(U8,    u8,    uint8_t)
+#endif
+#ifdef SIRIN_USE_SET_U16
 SIRIN_SET_IMPL(U16,   u16,   uint16_t)
+#endif
+#ifdef SIRIN_USE_SET_U32
 SIRIN_SET_IMPL(U32,   u32,   uint32_t)
+#endif
+#ifdef SIRIN_USE_SET_U64
 SIRIN_SET_IMPL(U64,   u64,   uint64_t)
+#endif
+#ifdef SIRIN_USE_SET_I8
 SIRIN_SET_IMPL(I8,    i8,    int8_t)
+#endif
+#ifdef SIRIN_USE_SET_I16
 SIRIN_SET_IMPL(I16,   i16,   int16_t)
+#endif
+#ifdef SIRIN_USE_SET_I32
 SIRIN_SET_IMPL(I32,   i32,   int32_t)
+#endif
+#ifdef SIRIN_USE_SET_I64
 SIRIN_SET_IMPL(I64,   i64,   int64_t)
+#endif
+#ifdef SIRIN_USE_SET_FLOAT
 SIRIN_SET_IMPL(Float, float, double)
+#endif
+#ifdef SIRIN_USE_SET_BOOL
 SIRIN_SET_IMPL(Bool,  bool,  int)
+#endif
 
 /* ── Map[str, T] ──────────────────────────────────────────────────────────── */
 
@@ -202,6 +269,12 @@ void sirin_map_str_##FuncName##_free(SirinMapStr##TypeName* m) {                
     m->keys = NULL; m->vals = NULL; m->len = 0; m->cap = 0;                       \
 }
 
+#ifdef SIRIN_USE_MAP_STR_INT
 SIRIN_MAP_STR_IMPL(Int,   int,   int64_t)
+#endif
+#ifdef SIRIN_USE_MAP_STR_STR
 SIRIN_MAP_STR_IMPL(Str,   str,   SirinCStr)
+#endif
+#ifdef SIRIN_USE_MAP_STR_FLOAT
 SIRIN_MAP_STR_IMPL(Float, float, double)
+#endif

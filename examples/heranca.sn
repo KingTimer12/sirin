@@ -1,0 +1,21 @@
+class Animal {
+    nome: str
+
+    init(n: str) {
+        nome = n
+    }
+
+    fn descrever() -> str => nome
+}
+
+class Cachorro extends Animal {
+    raca: str
+
+    init(n: str, r: str) {
+        nome = n
+        raca = r
+    }
+}
+
+a: Animal = Animal("Rex")
+c: Cachorro = Cachorro("Bolt", "Labrador")

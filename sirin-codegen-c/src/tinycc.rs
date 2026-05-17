@@ -101,6 +101,16 @@ impl Tcc {
         Ok(tcc)
     }
 
+    pub fn set_options(&self, opts: &str) -> Result<(), String> {
+        let c = CString::new(opts).unwrap();
+        let r = unsafe { tcc_set_options(self.state, c.as_ptr()) };
+        if r == -1 {
+            Err(self.collect_errors("set_options"))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Define o tipo de saída — deve ser chamado antes de qualquer compilação
     pub fn set_output_type(&self, output_type: c_int) -> Result<(), String> {
         let r = unsafe { tcc_set_output_type(self.state, output_type) };
