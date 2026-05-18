@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use sirin_parser::{
     expr::{BinOp, Expr},
     span::Spanned,
-    stmt::Stmt,
+    stmt::{ImplTarget, Stmt},
     types::Type,
 };
 
@@ -28,6 +28,8 @@ pub struct Emitter {
     class_methods: HashMap<String, HashMap<String, Type>>,
     /// #define names for each collection type used in emitted output
     used_types: RefCell<HashSet<String>>,
+    /// primitive type key (e.g. "int") → set of impl'd method names
+    prim_methods: HashMap<String, HashSet<String>>,
 }
 
 // True if any Stmt::Return in stmts (recursively) has value = Expr::Call(fn_name, _)
@@ -243,6 +245,26 @@ impl Emitter {
             class_parents: HashMap::new(),
             class_methods: HashMap::new(),
             used_types: RefCell::new(HashSet::new()),
+            prim_methods: HashMap::new(),
+        }
+    }
+
+    /// Returns (fn_prefix, c_self_type) for an ImplTarget.
+    fn impl_target_info(target: &ImplTarget) -> (&'static str, &'static str) {
+        match target {
+            ImplTarget::Named(_)          => ("", ""),  // handled separately
+            ImplTarget::Int | ImplTarget::I64 => ("int",   "int64_t"),
+            ImplTarget::Float             => ("float", "double"),
+            ImplTarget::Str               => ("str",   "const char*"),
+            ImplTarget::Bool              => ("bool",  "int"),
+            ImplTarget::U8                => ("u8",    "uint8_t"),
+            ImplTarget::U16               => ("u16",   "uint16_t"),
+            ImplTarget::U32               => ("u32",   "uint32_t"),
+            ImplTarget::U64               => ("u64",   "uint64_t"),
+            ImplTarget::I8                => ("i8",    "int8_t"),
+            ImplTarget::I16               => ("i16",   "int16_t"),
+            ImplTarget::I32               => ("i32",   "int32_t"),
+            ImplTarget::I64               => ("i64",   "int64_t"),
         }
     }
 
@@ -518,7 +540,7 @@ impl Emitter {
                 self.output.push_str(&format!("{}{};\n", self.indent(), val));
             }
 
-            Stmt::Class { name, abstract_, extends, implements, fields, methods } => {
+            Stmt::Class { name, abstract_, extends, is_, fields, methods } => {
                 let cls = name.node;
 
                 // Own fields only (for struct body)
@@ -632,12 +654,104 @@ impl Emitter {
                 self.current_class = None;
 
                 // Interface vtables — emit comments for now
-                for iface in implements {
+                for iface in is_ {
                     self.output.push_str(&format!("/* {} implements {} */\n\n", cls, iface.node));
                 }
             }
 
+            Stmt::Impl { target, methods } => {
+                match target {
+                    ImplTarget::Named(cls) => {
+                        // Methods for a named class — identical to class-body methods
+                        let cls_str = cls.to_string();
+                        let meth_paths: HashMap<String, String> = self.classes
+                            .get(*cls)
+                            .map(|fields| {
+                                fields.iter().map(|(fname, _)| {
+                                    (fname.clone(), format!("self->{}", fname))
+                                }).collect()
+                            })
+                            .unwrap_or_default();
+
+                        for m in methods {
+                            if let Stmt::Fn { name: mname, args, return_type, body } = &m.node {
+                                let ret = return_type.as_ref().map_or("void".to_string(), |t| self.type_to_c(t));
+                                let extra_params = args.iter()
+                                    .map(|(n, t)| format!("{} {}", self.type_to_c(t), n.node))
+                                    .collect::<Vec<_>>().join(", ");
+                                let full_params = if extra_params.is_empty() {
+                                    format!("{}* self", cls_str)
+                                } else {
+                                    format!("{}* self, {}", cls_str, extra_params)
+                                };
+                                self.output.push_str(&format!("{} {}_{}({}) {{\n", ret, cls_str, mname.node, full_params));
+                                self.vars.insert("self".to_string(), Type::Named(cls_str.clone()));
+                                self.method_field_paths = meth_paths.clone();
+                                self.depth += 1;
+                                for s in body { self.emit_stmt(&s.node); }
+                                self.depth -= 1;
+                                self.method_field_paths.clear();
+                                self.vars.remove("self");
+                                self.output.push_str("}\n\n");
+                            }
+                        }
+                    }
+                    _ => {
+                        let (prefix, c_self_ty) = Self::impl_target_info(target);
+                        for m in methods {
+                            if let Stmt::Fn { name: mname, args, return_type, body } = &m.node {
+                                let ret = return_type.as_ref().map_or("void".to_string(), |t| self.type_to_c(t));
+                                let extra_params = args.iter()
+                                    .map(|(n, t)| format!("{} {}", self.type_to_c(t), n.node))
+                                    .collect::<Vec<_>>().join(", ");
+                                let full_params = if extra_params.is_empty() {
+                                    format!("{} self", c_self_ty)
+                                } else {
+                                    format!("{} self, {}", c_self_ty, extra_params)
+                                };
+                                self.output.push_str(&format!(
+                                    "{} {}_{}({}) {{\n",
+                                    ret, prefix, mname.node, full_params
+                                ));
+                                // register self type so body expressions resolve correctly
+                                let self_ty = self.prim_prefix_to_type(prefix);
+                                self.vars.insert("self".to_string(), self_ty);
+                                self.depth += 1;
+                                for s in body { self.emit_stmt(&s.node); }
+                                self.depth -= 1;
+                                self.vars.remove("self");
+                                self.output.push_str("}\n\n");
+
+                                // track for call-site routing
+                                self.prim_methods
+                                    .entry(prefix.to_string())
+                                    .or_default()
+                                    .insert(mname.node.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
             _ => {}
+        }
+    }
+
+    fn prim_prefix_to_type(&self, prefix: &str) -> Type {
+        match prefix {
+            "int"   => Type::Int,
+            "float" => Type::Float,
+            "str"   => Type::Str,
+            "bool"  => Type::Bool,
+            "u8"    => Type::U8,
+            "u16"   => Type::U16,
+            "u32"   => Type::U32,
+            "u64"   => Type::U64,
+            "i8"    => Type::I8,
+            "i16"   => Type::I16,
+            "i32"   => Type::I32,
+            "i64"   => Type::I64,
+            _       => Type::Void,
         }
     }
 
@@ -741,7 +855,34 @@ impl Emitter {
                             format!("{}_{}({}, {})", cls, method, receiver, args_str)
                         }
                     }
-                    _ => format!("{}.{}({})", obj_str, method, args_str),
+                    _ => {
+                        // Check primitive impl methods registered via `impl T`
+                        let prefix = match &obj_ty {
+                            Type::Int | Type::I64 => Some("int"),
+                            Type::Float           => Some("float"),
+                            Type::Str             => Some("str"),
+                            Type::Bool            => Some("bool"),
+                            Type::U8              => Some("u8"),
+                            Type::U16             => Some("u16"),
+                            Type::U32             => Some("u32"),
+                            Type::U64             => Some("u64"),
+                            Type::I8              => Some("i8"),
+                            Type::I16             => Some("i16"),
+                            Type::I32             => Some("i32"),
+                            Type::I64             => Some("i64"),
+                            _ => None,
+                        };
+                        if let Some(pfx) = prefix {
+                            if self.prim_methods.get(pfx).map_or(false, |s| s.contains(*method)) {
+                                return if args_str.is_empty() {
+                                    format!("{}_{}({})", pfx, method, obj_str)
+                                } else {
+                                    format!("{}_{} ({}, {})", pfx, method, obj_str, args_str)
+                                };
+                            }
+                        }
+                        format!("{}.{}({})", obj_str, method, args_str)
+                    }
                 }
             }
             Expr::FieldAccess(obj, field) => {
@@ -932,6 +1073,7 @@ impl Emitter {
         for s in stmts {
             match &s.node {
                 Stmt::Class { .. }     => class_stmts.push(s),
+                Stmt::Impl { .. }      => class_stmts.push(s),
                 Stmt::Interface { name, .. } => {
                     self.output.push_str(&format!("/* interface {} */\n\n", name.node));
                 }
@@ -1015,5 +1157,45 @@ mod tests {
     fn test_interface_emits_comment() {
         let c = emit("interface Corredor {\n    fn correr() -> str\n}");
         assert!(c.contains("/* interface Corredor */"), "interface must emit a comment");
+    }
+
+    #[test]
+    fn test_impl_int_dobrar_eh_par() {
+        let c = emit(
+            "impl int {\n    fn dobrar() -> int => self * 2\n    fn eh_par() -> bool => self == 0\n}"
+        );
+        assert!(c.contains("int64_t int_dobrar(int64_t self)"), "impl int fn must use int64_t self");
+        assert!(c.contains("int int_eh_par(int64_t self)"),     "bool return maps to int in C");
+    }
+
+    #[test]
+    fn test_impl_str_vazio() {
+        let c = emit("impl str {\n    fn vazio() -> bool => self == 0\n}");
+        assert!(c.contains("int str_vazio(const char* self)"), "impl str fn must use const char* self");
+    }
+
+    #[test]
+    fn test_impl_named_adds_method() {
+        let c = emit(
+            "class Animal {\n    nome: str\n    init(n: str) { nome = n }\n}\nimpl Animal {\n    fn cumprimentar() -> str => nome\n}"
+        );
+        assert!(c.contains("const char* Animal_cumprimentar(Animal* self)"), "impl for named type emits pointer self");
+        assert!(c.contains("self->nome"), "field access inside impl method uses ->");
+    }
+
+    #[test]
+    fn test_prim_method_call_routes_correctly() {
+        let c = emit(
+            "impl int {\n    fn dobrar() -> int => self * 2\n}\nx: int = 5\ny: int = x.dobrar()"
+        );
+        assert!(c.contains("int_dobrar(x)"), "x.dobrar() must emit int_dobrar(x)");
+    }
+
+    #[test]
+    fn test_class_is_emits_comment() {
+        let c = emit(
+            "interface Ave { fn voar() -> str }\nclass Pato implements Ave {\n    fn voar() -> str => \"bate asas\"\n}"
+        );
+        assert!(c.contains("/* Pato implements Ave */"), "implements clause must emit comment");
     }
 }

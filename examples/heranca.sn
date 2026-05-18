@@ -1,3 +1,7 @@
+interface Late {
+    fn latir() -> str
+}
+
 class Animal {
     nome: str
 
@@ -8,13 +12,15 @@ class Animal {
     fn descrever() -> str => nome
 }
 
-class Cachorro extends Animal {
+class Cachorro extends Animal implements Late {
     raca: str
 
     init(n: str, r: str) {
         nome = n
         raca = r
     }
+
+    fn latir() -> str => self.nome
 }
 
 a: Animal = Animal("Rex")

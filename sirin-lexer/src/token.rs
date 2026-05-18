@@ -62,6 +62,10 @@ pub enum Tokens<'a> {
     Implements,
     #[token("interface")]
     Interface,
+    #[token("impl")]
+    Impl,
+    #[token("is")]
+    Is,
     #[token("init")]
     Init,
     #[token("default")]

@@ -13,4 +13,5 @@ pub enum CheckerError<'a> {
     PossibleNull(&'a str, Type), // quando pode ser nulo, não deixará continuar
     InvalidOperation { op: BinOp, ty: Type },
     UseAfterMove { var: &'a str, moved_to: String },
+    MissingInterfaceMethod { class: String, interface: String, method: String },
 }

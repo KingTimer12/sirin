@@ -137,6 +137,61 @@ mod tests {
         checker.check_stmt(&stmts[0]).expect("Map[str, int] deve ser tipo válido");
     }
 
+    macro_rules! check_ok {
+        ($src:expr) => {{
+            let src = $src;
+            let tokens = sirin_parser::lex(src);
+            let eoi = SimpleSpan::from(src.len()..src.len());
+            let stmts = parser().parse(tokens.as_slice().split_token_span(eoi))
+                .into_result().expect("parse failed");
+            let mut checker = Checker::new(src);
+            for stmt in &stmts {
+                checker.check_stmt(stmt).expect("unexpected error");
+            }
+        }};
+    }
+
+    #[test]
+    fn test_impl_int_primitive() {
+        check_ok!("impl int {\n    fn dobrar() -> int => self * 2\n}");
+    }
+
+    #[test]
+    fn test_impl_str_primitive() {
+        check_ok!("impl str {\n    fn vazio() -> bool => self == self\n}");
+    }
+
+    #[test]
+    fn test_impl_named_adds_method() {
+        check_ok!("class Animal {\n    nome: str\n    init(n: str) { nome = n }\n}\nimpl Animal {\n    fn cumprimentar() -> str => nome\n}");
+    }
+
+    #[test]
+    fn test_interface_missing_method_error() {
+        let src = "interface Descritivel {\n    fn descrever() -> str\n}\nclass Coisa is Descritivel {\n    x: int\n}";
+        let tokens = sirin_parser::lex(src);
+        let eoi = SimpleSpan::from(src.len()..src.len());
+        let stmts = parser().parse(tokens.as_slice().split_token_span(eoi)).into_result().expect("parse failed");
+        let mut checker = Checker::new(src);
+        let mut got_error = false;
+        for stmt in &stmts {
+            if let Err(e) = checker.check_stmt(stmt) {
+                assert!(
+                    matches!(e, CheckerError::MissingInterfaceMethod { ref method, .. } if method == "descrever"),
+                    "esperava MissingInterfaceMethod para descrever, got {e:?}"
+                );
+                got_error = true;
+                break;
+            }
+        }
+        assert!(got_error, "expected MissingInterfaceMethod error");
+    }
+
+    #[test]
+    fn test_interface_satisfied() {
+        check_ok!("interface Descritivel {\n    fn descrever() -> str\n}\nclass Coisa is Descritivel {\n    x: int\n    fn descrever() -> str => \"ok\"\n}");
+    }
+
     // erro: x: u8 = "texto" — typed-let com tipo incompatível
     #[test]
     fn test_explicit_int_type_incompatible() {

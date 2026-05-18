@@ -4,7 +4,7 @@ use sirin_diagnostics::report_error;
 use sirin_parser::{
     expr::{BinOp, Expr},
     span::Spanned,
-    stmt::Stmt,
+    stmt::{ImplTarget, Stmt},
     types::Type,
 };
 
@@ -23,6 +23,7 @@ struct MethodInfo {
 struct ClassInfo {
     fields: Vec<(String, FieldInfo)>,  // ordered
     methods: HashMap<String, MethodInfo>,
+    extends: Option<String>,
 }
 
 impl ClassInfo {
@@ -31,17 +32,65 @@ impl ClassInfo {
     }
 }
 
+struct InterfaceMethodInfo {
+    name: String,
+}
+
 // ── Checker ───────────────────────────────────────────────────────────────────
 
 pub struct Checker<'a> {
     pub src: &'a str,
     pub(crate) env: Env<'a>,
     classes: HashMap<String, ClassInfo>,
+    interfaces: HashMap<String, Vec<InterfaceMethodInfo>>,
+    primitive_impls: HashMap<String, HashMap<String, MethodInfo>>,
 }
 
 impl<'a> Checker<'a> {
     pub fn new(src: &'a str) -> Self {
-        Self { src, env: Env::new(), classes: HashMap::new() }
+        Self {
+            src,
+            env: Env::new(),
+            classes: HashMap::new(),
+            interfaces: HashMap::new(),
+            primitive_impls: HashMap::new(),
+        }
+    }
+
+    fn impl_target_type(target: &ImplTarget) -> Type {
+        match target {
+            ImplTarget::Named(n) => Type::Named(n.to_string()),
+            ImplTarget::Int  => Type::Int,
+            ImplTarget::Float => Type::Float,
+            ImplTarget::Str  => Type::Str,
+            ImplTarget::Bool => Type::Bool,
+            ImplTarget::U8   => Type::U8,
+            ImplTarget::U16  => Type::U16,
+            ImplTarget::U32  => Type::U32,
+            ImplTarget::U64  => Type::U64,
+            ImplTarget::I8   => Type::I8,
+            ImplTarget::I16  => Type::I16,
+            ImplTarget::I32  => Type::I32,
+            ImplTarget::I64  => Type::I64,
+        }
+    }
+
+    fn prim_key(ty: &Type) -> Option<&'static str> {
+        match ty {
+            Type::Int | Type::I64 => Some("int"),
+            Type::Float           => Some("float"),
+            Type::Str             => Some("str"),
+            Type::Bool            => Some("bool"),
+            Type::U8              => Some("u8"),
+            Type::U16             => Some("u16"),
+            Type::U32             => Some("u32"),
+            Type::U64             => Some("u64"),
+            Type::I8              => Some("i8"),
+            Type::I16             => Some("i16"),
+            Type::I32             => Some("i32"),
+            Type::I64             => Some("i64"),
+            _                     => None,
+        }
     }
 
     pub fn check_stmt(&mut self, stmt: &Spanned<Stmt<'a>>) -> Result<(), CheckerError<'a>> {
@@ -190,7 +239,7 @@ impl<'a> Checker<'a> {
             }
 
             // ── Class declaration ─────────────────────────────────────────────
-            Stmt::Class { name, fields, methods, .. } => {
+            Stmt::Class { name, fields, methods, is_, extends, .. } => {
                 let class_name = name.node;
 
                 // Register with fields first (methods resolved after)
@@ -199,7 +248,25 @@ impl<'a> Checker<'a> {
                         .map(|f| (f.name.node.to_string(), FieldInfo { ty: f.ty.clone() }))
                         .collect(),
                     methods: HashMap::new(),
+                    extends: extends.as_ref().map(|e| e.node.to_string()),
                 });
+
+                // collect inherited fields (parent chain already registered)
+                let inherited: Vec<(String, Type)> = {
+                    let mut acc = vec![];
+                    let mut cur = extends.as_ref().map(|e| e.node.to_string());
+                    while let Some(pname) = cur {
+                        if let Some(pci) = self.classes.get(pname.as_str()) {
+                            for (fname, finfo) in &pci.fields {
+                                acc.push((fname.clone(), finfo.ty.clone()));
+                            }
+                            cur = pci.extends.clone();
+                        } else {
+                            break;
+                        }
+                    }
+                    acc
+                };
 
                 let mut method_infos: HashMap<String, MethodInfo> = HashMap::new();
 
@@ -210,6 +277,9 @@ impl<'a> Checker<'a> {
                             self.env.define("self", Type::Named(class_name.to_string()));
                             for f in fields {
                                 self.env.define(f.name.node, f.ty.clone());
+                            }
+                            for (fname, fty) in &inherited {
+                                self.env.define(Box::leak(fname.clone().into_boxed_str()), fty.clone());
                             }
                             for (aname, aty) in args {
                                 self.env.define(aname.node, aty.clone());
@@ -230,6 +300,9 @@ impl<'a> Checker<'a> {
                             for f in fields {
                                 self.env.define(f.name.node, f.ty.clone());
                             }
+                            for (fname, fty) in &inherited {
+                                self.env.define(Box::leak(fname.clone().into_boxed_str()), fty.clone());
+                            }
                             for (aname, aty) in args {
                                 self.env.define(aname.node, aty.clone());
                             }
@@ -243,6 +316,9 @@ impl<'a> Checker<'a> {
                             self.env.define("self", Type::Named(class_name.to_string()));
                             for f in fields {
                                 self.env.define(f.name.node, f.ty.clone());
+                            }
+                            for (fname, fty) in &inherited {
+                                self.env.define(Box::leak(fname.clone().into_boxed_str()), fty.clone());
                             }
                             for s in body {
                                 self.check_stmt(s)?;
@@ -261,10 +337,101 @@ impl<'a> Checker<'a> {
                 if let Some(ci) = self.classes.get_mut(class_name) {
                     ci.methods = method_infos;
                 }
+
+                // Validate that all interface methods are implemented
+                for iface in is_ {
+                    if let Some(iface_methods) = self.interfaces.get(iface.node) {
+                        for im in iface_methods {
+                            if let Some(ci) = self.classes.get(class_name) {
+                                if !ci.methods.contains_key(&im.name) {
+                                    report_error(
+                                        &iface.span.file,
+                                        self.src,
+                                        &iface.span,
+                                        "interface not implemented",
+                                        &format!(
+                                            "`{}` requires `{}` but `{}` does not define it",
+                                            iface.node, im.name, class_name
+                                        ),
+                                    );
+                                    return Err(CheckerError::MissingInterfaceMethod {
+                                        class: class_name.to_string(),
+                                        interface: iface.node.to_string(),
+                                        method: im.name.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(())
             }
 
-            Stmt::Interface { .. } => Ok(()),
+            Stmt::Interface { name, methods } => {
+                let infos = methods.iter()
+                    .map(|m| InterfaceMethodInfo { name: m.name.node.to_string() })
+                    .collect();
+                self.interfaces.insert(name.node.to_string(), infos);
+                Ok(())
+            }
+
+            Stmt::Impl { target, methods } => {
+                let self_ty = Self::impl_target_type(target);
+
+                // For named targets, collect field types to inject into method scope
+                let class_fields: Vec<(String, Type)> = if let ImplTarget::Named(cls) = target {
+                    self.classes.get(*cls)
+                        .map(|ci| ci.fields.iter().map(|(n, f)| (n.clone(), f.ty.clone())).collect())
+                        .unwrap_or_default()
+                } else {
+                    vec![]
+                };
+
+                for method_stmt in methods {
+                    if let Stmt::Fn { name: mname, args, return_type, body } = &method_stmt.node {
+                        self.env.push_scope();
+                        self.env.define("self", self_ty.clone());
+                        for (fname, fty) in &class_fields {
+                            self.env.define(
+                                // SAFETY: field names are &'a str stored in ClassInfo — we need
+                                // to leak to get 'a lifetime; ClassInfo owns String, not &str
+                                // so we use a workaround: store in env as owned key
+                                Box::leak(fname.clone().into_boxed_str()),
+                                fty.clone(),
+                            );
+                        }
+                        for (aname, aty) in args {
+                            self.env.define(aname.node, aty.clone());
+                        }
+                        self.env.set_return(return_type.clone());
+                        for s in body {
+                            self.check_stmt(s)?;
+                        }
+                        self.env.pop_scope();
+                        self.env.set_return(None);
+
+                        let ret = return_type.clone().unwrap_or(Type::Void);
+                        let method_info = MethodInfo { return_type: ret };
+
+                        match target {
+                            ImplTarget::Named(cls) => {
+                                if let Some(ci) = self.classes.get_mut(*cls) {
+                                    ci.methods.insert(mname.node.to_string(), method_info);
+                                }
+                            }
+                            _ => {
+                                if let Some(key) = Self::prim_key(&self_ty) {
+                                    self.primitive_impls
+                                        .entry(key.to_string())
+                                        .or_default()
+                                        .insert(mname.node.to_string(), method_info);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
 
             _ => Ok(()),
         }
@@ -526,6 +693,14 @@ impl<'a> Checker<'a> {
                     }
                     _ => {
                         for arg in args { self.check_expr(arg)?; }
+                        // primitive impl lookup
+                        if let Some(key) = Self::prim_key(&obj_ty) {
+                            if let Some(prim_methods) = self.primitive_impls.get(key) {
+                                if let Some(mi) = prim_methods.get(*method) {
+                                    return Ok(mi.return_type.clone());
+                                }
+                            }
+                        }
                         Ok(Type::Void)
                     }
                 }
@@ -535,9 +710,15 @@ impl<'a> Checker<'a> {
             Expr::FieldAccess(obj, field) => {
                 let obj_ty = self.check_expr(obj)?;
                 if let Type::Named(cls) = &obj_ty {
-                    if let Some(class_info) = self.classes.get(cls.as_str()) {
-                        if let Some(ty) = class_info.field_type(field) {
-                            return Ok(ty.clone());
+                    let mut current = Some(cls.clone());
+                    while let Some(cls_name) = current {
+                        if let Some(class_info) = self.classes.get(cls_name.as_str()) {
+                            if let Some(ty) = class_info.field_type(field) {
+                                return Ok(ty.clone());
+                            }
+                            current = class_info.extends.clone();
+                        } else {
+                            break;
                         }
                     }
                 }

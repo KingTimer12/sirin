@@ -1,5 +1,13 @@
 use crate::{expr::Expr, span::Spanned, types::Type};
 
+#[derive(Debug, Clone)]
+pub enum ImplTarget<'a> {
+    Named(&'a str),
+    Int, Float, Str, Bool,
+    U8, U16, U32, U64,
+    I8, I16, I32, I64,
+}
+
 #[derive(Debug)]
 pub struct ClassField<'a> {
     pub name: Spanned<&'a str>,
@@ -44,16 +52,20 @@ pub enum Stmt<'a> {
     },
     Expr(Spanned<Expr<'a>>),
     Class {
-        name:       Spanned<&'a str>,
-        abstract_:  bool,
-        extends:    Option<Spanned<&'a str>>,
-        implements: Vec<Spanned<&'a str>>,
-        fields:     Vec<ClassField<'a>>,
-        methods:    Vec<Spanned<Stmt<'a>>>,
+        name:      Spanned<&'a str>,
+        abstract_: bool,
+        extends:   Option<Spanned<&'a str>>,
+        is_:       Vec<Spanned<&'a str>>,
+        fields:    Vec<ClassField<'a>>,
+        methods:   Vec<Spanned<Stmt<'a>>>,
     },
     Interface {
         name:    Spanned<&'a str>,
         methods: Vec<InterfaceMethod<'a>>,
+    },
+    Impl {
+        target:  ImplTarget<'a>,
+        methods: Vec<Spanned<Stmt<'a>>>,
     },
     Init {
         args: Vec<(Spanned<&'a str>, Type)>,

@@ -179,11 +179,11 @@ mod tests {
         parse!(stmts, "class Animal { nome: str }");
         assert_eq!(stmts.len(), 1);
         match &stmts[0].node {
-            Stmt::Class { name, abstract_, extends, implements, fields, methods } => {
+            Stmt::Class { name, abstract_, extends, is_, fields, methods } => {
                 assert_eq!(name.node, "Animal");
                 assert!(!abstract_);
                 assert!(extends.is_none());
-                assert!(implements.is_empty());
+                assert!(is_.is_empty());
                 assert_eq!(fields.len(), 1);
                 assert_eq!(fields[0].name.node, "nome");
                 assert_eq!(fields[0].ty, Type::Str);
@@ -219,14 +219,15 @@ mod tests {
 
     #[test]
     fn test_class_implements() {
+        // `implements` still accepted as alias for `is`
         parse!(stmts, "class Cachorro implements Corredor { }");
         assert_eq!(stmts.len(), 1);
         match &stmts[0].node {
-            Stmt::Class { implements, .. } => {
-                assert_eq!(implements.len(), 1);
-                assert_eq!(implements[0].node, "Corredor");
+            Stmt::Class { is_, .. } => {
+                assert_eq!(is_.len(), 1);
+                assert_eq!(is_[0].node, "Corredor");
             }
-            _ => panic!("expected class with implements"),
+            _ => panic!("expected class with is"),
         }
     }
 
@@ -342,10 +343,10 @@ mod tests {
         parse!(stmts, "class Cachorro extends Animal implements Corredor { }");
         assert_eq!(stmts.len(), 1);
         match &stmts[0].node {
-            Stmt::Class { extends, implements, .. } => {
+            Stmt::Class { extends, is_, .. } => {
                 assert_eq!(extends.as_ref().unwrap().node, "Animal");
-                assert_eq!(implements.len(), 1);
-                assert_eq!(implements[0].node, "Corredor");
+                assert_eq!(is_.len(), 1);
+                assert_eq!(is_[0].node, "Corredor");
             }
             _ => panic!("expected class with extends+implements"),
         }

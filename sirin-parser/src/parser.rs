@@ -15,7 +15,7 @@ use sirin_lexer::token::Tokens;
 use crate::{
     expr::{BinOp, Expr},
     span::Spanned,
-    stmt::{ClassField, InterfaceMethod, Stmt},
+    stmt::{ClassField, ImplTarget, InterfaceMethod, Stmt},
     types::Type,
 };
 
@@ -538,38 +538,41 @@ pub fn parser<'a>()
             });
 
         // keywords-first order; field_mut before field_imm to avoid consuming mut as ident
+        // Boxed so the type is Clone + reusable in both class_stmt and impl_stmt
         let class_item = abstract_fn
             .or(class_fn)
             .or(init_item)
             .or(default_item)
             .or(class_field_mut)
-            .or(class_field_imm);
+            .or(class_field_imm)
+            .boxed();
+        let impl_item = class_item.clone();
 
-        // [abstract] class Name [extends P] [implements I1, I2] { items }
+        // [abstract] class Name [extends P] [is I1, I2 | implements I1, I2] { items }
+        let is_clause = choice((just(Tokens::Is), just(Tokens::Implements)))
+            .ignore_then(
+                spanned_name
+                    .clone()
+                    .separated_by(just(Tokens::Comma))
+                    .collect::<Vec<_>>(),
+            )
+            .or_not()
+            .map(|opt| opt.unwrap_or_default());
+
         let class_stmt = choice((
             just(Tokens::Abstract).then_ignore(just(Tokens::Class)).to(true),
             just(Tokens::Class).to(false),
         ))
         .then(spanned_name.clone())
         .then(just(Tokens::Extends).ignore_then(spanned_name.clone()).or_not())
-        .then(
-            just(Tokens::Implements)
-                .ignore_then(
-                    spanned_name
-                        .clone()
-                        .separated_by(just(Tokens::Comma))
-                        .collect::<Vec<_>>(),
-                )
-                .or_not()
-                .map(|opt| opt.unwrap_or_default()),
-        )
+        .then(is_clause)
         .then(
             class_item
                 .repeated()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
         )
-        .map_with(|((((abstract_, name), extends), implements), items), extra| {
+        .map_with(|((((abstract_, name), extends), is_), items), extra| {
             let mut fields  = vec![];
             let mut methods = vec![];
             for item in items {
@@ -579,7 +582,7 @@ pub fn parser<'a>()
                 }
             }
             Spanned::new(
-                Stmt::Class { name, abstract_, extends, implements, fields, methods },
+                Stmt::Class { name, abstract_, extends, is_, fields, methods },
                 sp(extra.span()),
             )
         });
@@ -609,6 +612,41 @@ pub fn parser<'a>()
                 Spanned::new(Stmt::Interface { name, methods }, sp(extra.span()))
             });
 
+        // impl Target { fn ... }
+        let impl_target = choice((
+            just(Tokens::IntType).to(ImplTarget::Int),
+            just(Tokens::FloatType).to(ImplTarget::Float),
+            just(Tokens::StringType).to(ImplTarget::Str),
+            just(Tokens::BoolType).to(ImplTarget::Bool),
+            just(Tokens::U8Type).to(ImplTarget::U8),
+            just(Tokens::U16Type).to(ImplTarget::U16),
+            just(Tokens::U32Type).to(ImplTarget::U32),
+            just(Tokens::U64Type).to(ImplTarget::U64),
+            just(Tokens::I8Type).to(ImplTarget::I8),
+            just(Tokens::I16Type).to(ImplTarget::I16),
+            just(Tokens::I32Type).to(ImplTarget::I32),
+            just(Tokens::I64Type).to(ImplTarget::I64),
+            ident_name.clone().map(ImplTarget::Named),
+        ));
+
+        let impl_stmt = just(Tokens::Impl)
+            .ignore_then(impl_target)
+            .then(
+                impl_item
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+            )
+            .map_with(|(target, items), extra| {
+                let methods = items.into_iter()
+                    .filter_map(|item| match item {
+                        ClassItem::Method(m) => Some(m),
+                        ClassItem::Field(_) => None,
+                    })
+                    .collect();
+                Spanned::new(Stmt::Impl { target, methods }, sp(extra.span()))
+            });
+
         // Boxed: prevents exponential type growth per stmt variant.
         // typed_* must precede untyped — both start with ident, disambiguated by ':' vs '='/'  :='
         typed_copy_var
@@ -620,6 +658,7 @@ pub fn parser<'a>()
             .or(r#fn)
             .or(class_stmt)
             .or(interface_stmt)
+            .or(impl_stmt)
             .or(expr
                 .clone()
                 .map_with(|e, extra| Spanned::new(Stmt::Expr(e), sp(extra.span()))))
