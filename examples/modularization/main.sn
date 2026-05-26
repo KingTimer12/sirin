@@ -1,0 +1,10 @@
+use sirin.io
+use math
+
+a = soma(10, 3)
+b = sub(10, 3)
+c = mul(10, 3)
+
+println(a)
+println(b)
+println(c)

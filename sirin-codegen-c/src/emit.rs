@@ -231,6 +231,16 @@ fn ty_to_define(ty: &Type) -> Option<&'static str> {
     }
 }
 
+/// Symbols exported from a compiled module, absorbed by the main-program emitter.
+pub struct ModuleExports {
+    pub fns: HashMap<String, Type>,
+    pub classes: HashMap<String, Vec<(String, Type)>>,
+    pub class_methods: HashMap<String, HashMap<String, Type>>,
+    pub prim_methods: HashMap<String, HashSet<String>>,
+    pub used_types: HashSet<String>,
+    pub io_imported: bool,
+}
+
 impl Emitter {
     pub fn new() -> Self {
         Self {
@@ -250,6 +260,77 @@ impl Emitter {
             prim_methods: HashMap::new(),
             io_imported: false,
         }
+    }
+
+    /// Merge exported symbols from a module into this emitter before emitting the main program.
+    pub fn absorb_exports(&mut self, exports: &ModuleExports) {
+        for (k, v) in &exports.fns {
+            self.fns.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &exports.classes {
+            self.classes.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &exports.class_methods {
+            self.class_methods.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &exports.prim_methods {
+            self.prim_methods.entry(k.clone()).or_default().extend(v.clone());
+        }
+        self.used_types.borrow_mut().extend(exports.used_types.clone());
+        if exports.io_imported {
+            self.io_imported = true;
+        }
+    }
+
+    /// Emit only the functions/classes from a module (no `main`, no `#include`).
+    /// Returns `(c_body, exports)` where exports can be absorbed by the main emitter.
+    pub fn emit_module<'a>(mut self, stmts: &'a [Spanned<Stmt<'a>>]) -> (String, ModuleExports) {
+        let mut class_stmts = vec![];
+        let mut fn_stmts = vec![];
+
+        for s in stmts {
+            match &s.node {
+                Stmt::Use { path } => {
+                    if path.join(".") == "sirin.io" {
+                        self.io_imported = true;
+                    }
+                }
+                Stmt::Class { .. } | Stmt::Impl { .. } => class_stmts.push(s),
+                Stmt::Interface { name, .. } => {
+                    self.output.push_str(&format!("/* interface {} */\n\n", name.node));
+                }
+                Stmt::Fn { .. } => fn_stmts.push(s),
+                _ => {}
+            }
+        }
+
+        for s in &class_stmts { self.emit_stmt(&s.node); }
+        for s in &fn_stmts    { self.emit_stmt(&s.node); }
+
+        let exports = ModuleExports {
+            fns: self.fns.iter()
+                .filter(|(k, _)| !k.starts_with('_'))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            classes: self.classes.clone(),
+            class_methods: self.class_methods.clone(),
+            prim_methods: self.prim_methods.clone(),
+            used_types: self.used_types.borrow().clone(),
+            io_imported: self.io_imported,
+        };
+
+        (self.output, exports)
+    }
+
+    /// Like `emit_program_and_prefix` but returns raw `(body, defines_prefix, io_imported)`.
+    /// Lets the caller inject module code between the includes and main body.
+    pub fn emit_body_and_prefix<'a>(
+        mut self,
+        stmts: &'a [Spanned<Stmt<'a>>],
+    ) -> (String, String, bool) {
+        self.emit_top_level(stmts);
+        let prefix = self.defines_prefix();
+        (self.output, prefix, self.io_imported)
     }
 
     /// Returns (fn_prefix, c_self_type) for an ImplTarget.
@@ -1117,12 +1198,10 @@ impl Emitter {
         for s in stmts {
             match &s.node {
                 Stmt::Use { path } => {
-                    let module = path.join(".");
-                    if module == "sirin.io" {
+                    if path.join(".") == "sirin.io" {
                         self.io_imported = true;
-                    } else {
-                        self.output.push_str(&format!("/* use {} */\n\n", module));
                     }
+                    // local module stmts are resolved by the CLI before emission
                 }
                 Stmt::Class { .. }     => class_stmts.push(s),
                 Stmt::Impl { .. }      => class_stmts.push(s),

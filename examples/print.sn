@@ -1,0 +1,11 @@
+use sirin.io
+
+nome = "Sirin Lang"
+x = 42
+v: u8 = 255
+
+println(nome)
+println(x)
+println(v)
+print("versão: ")
+println(1)

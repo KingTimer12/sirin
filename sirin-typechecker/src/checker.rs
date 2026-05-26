@@ -45,6 +45,10 @@ pub struct Checker<'a> {
     interfaces: HashMap<String, Vec<InterfaceMethodInfo>>,
     primitive_impls: HashMap<String, HashMap<String, MethodInfo>>,
     imported_modules: HashSet<String>,
+    /// return types of functions declared in imported local modules
+    fns: HashMap<String, sirin_parser::types::Type>,
+    /// names of private (_-prefixed) functions from imported modules
+    module_private_fns: HashSet<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -56,6 +60,46 @@ impl<'a> Checker<'a> {
             interfaces: HashMap::new(),
             primitive_impls: HashMap::new(),
             imported_modules: HashSet::new(),
+            fns: HashMap::new(),
+            module_private_fns: HashSet::new(),
+        }
+    }
+
+    /// Register exported symbols from a parsed local module before checking the main file.
+    /// Private symbols (name starts with `_`) are tracked but not exported.
+    pub fn import_module(&mut self, stmts: &[Spanned<Stmt<'_>>]) {
+        for s in stmts {
+            match &s.node {
+                Stmt::Fn { name, return_type, .. } => {
+                    let fn_name = name.node.to_string();
+                    if fn_name.starts_with('_') {
+                        self.module_private_fns.insert(fn_name);
+                    } else {
+                        self.fns.insert(fn_name, return_type.clone().unwrap_or(Type::Void));
+                    }
+                }
+                Stmt::Class { name, fields, methods, extends, .. } => {
+                    if name.node.starts_with('_') {
+                        continue;
+                    }
+                    let mut method_infos: HashMap<String, MethodInfo> = HashMap::new();
+                    for m in methods {
+                        if let Stmt::Fn { name: mn, return_type, .. } | Stmt::AbstractFn { name: mn, return_type, .. } = &m.node {
+                            method_infos.insert(mn.node.to_string(), MethodInfo {
+                                return_type: return_type.clone().unwrap_or(Type::Void),
+                            });
+                        }
+                    }
+                    self.classes.insert(name.node.to_string(), ClassInfo {
+                        fields: fields.iter()
+                            .map(|f| (f.name.node.to_string(), FieldInfo { ty: f.ty.clone() }))
+                            .collect(),
+                        methods: method_infos,
+                        extends: extends.as_ref().map(|e| e.node.to_string()),
+                    });
+                }
+                _ => {}
+            }
         }
     }
 
@@ -171,7 +215,11 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::Fn { args, return_type, body, .. } => {
+            Stmt::Fn { name: fn_decl_name, args, return_type, body } => {
+                self.fns.insert(
+                    fn_decl_name.node.to_string(),
+                    return_type.clone().unwrap_or(Type::Void),
+                );
                 self.env.push_scope();
 
                 for (arg_name, arg_ty) in args {
@@ -574,7 +622,18 @@ impl<'a> Checker<'a> {
                     }
                     Ok(Type::Str)
                 }
-                _ => Ok(Type::Int), // TODO: resolução de fn
+                _ => {
+                    if self.module_private_fns.contains(*name) {
+                        return Err(CheckerError::PrivateAccess {
+                            name: name.to_string(),
+                            module: "módulo importado".to_string(),
+                        });
+                    }
+                    if let Some(ret) = self.fns.get(*name) {
+                        return Ok(ret.clone());
+                    }
+                    Ok(Type::Int) // TODO: resolução de fn local
+                }
             },
             Expr::Array(items) => {
                 if items.is_empty() {

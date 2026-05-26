@@ -3,6 +3,7 @@ use clap::{Command, arg};
 use crate::commands::register_commands;
 
 mod commands;
+mod resolver;
 
 fn file_arg() -> clap::Arg {
     arg!(<file> "Arquivo .sirin").required(true)

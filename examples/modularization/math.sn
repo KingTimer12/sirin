@@ -1,0 +1,4 @@
+fn soma(a: int, b: int) -> int => a + b
+fn sub(a: int, b: int) -> int => a - b
+fn mul(a: int, b: int) -> int => a * b
+fn _dobrar(x: int) -> int => x * 2
