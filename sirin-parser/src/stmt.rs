@@ -79,4 +79,7 @@ pub enum Stmt<'a> {
         args:        Vec<(Spanned<&'a str>, Type)>,
         return_type: Option<Type>,
     },
+    Use {
+        path: Vec<&'a str>,
+    },
 }

@@ -184,4 +184,9 @@ double           sirin_map_str_float_get(SirinMapStrFloat* m, const char* key);
 void             sirin_map_str_float_free(SirinMapStrFloat* m);
 #endif
 
+/* ── sirin.io ──────────────────────────────────────────────────────────────── */
+#include <stdio.h>
+#include <string.h>
+const char* sirin_readln(void);
+
 #endif

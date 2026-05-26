@@ -14,4 +14,5 @@ pub enum CheckerError<'a> {
     InvalidOperation { op: BinOp, ty: Type },
     UseAfterMove { var: &'a str, moved_to: String },
     MissingInterfaceMethod { class: String, interface: String, method: String },
+    ModuleNotImported { module: String, function: String },
 }

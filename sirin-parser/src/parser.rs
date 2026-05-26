@@ -647,6 +647,21 @@ pub fn parser<'a>()
                 Spanned::new(Stmt::Impl { target, methods }, sp(extra.span()))
             });
 
+        // use sirin.io  /  use sirin.net  etc.
+        let use_stmt = just(Tokens::Use)
+            .ignore_then(ident_name.clone())
+            .then(
+                just(Tokens::Dot)
+                    .ignore_then(ident_name.clone())
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .map_with(|(first, rest), extra| {
+                let mut path = vec![first];
+                path.extend(rest);
+                Spanned::new(Stmt::Use { path }, sp(extra.span()))
+            });
+
         // Boxed: prevents exponential type growth per stmt variant.
         // typed_* must precede untyped — both start with ident, disambiguated by ':' vs '='/'  :='
         typed_copy_var
@@ -659,6 +674,7 @@ pub fn parser<'a>()
             .or(class_stmt)
             .or(interface_stmt)
             .or(impl_stmt)
+            .or(use_stmt)
             .or(expr
                 .clone()
                 .map_with(|e, extra| Spanned::new(Stmt::Expr(e), sp(extra.span()))))

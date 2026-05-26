@@ -30,6 +30,8 @@ pub struct Emitter {
     used_types: RefCell<HashSet<String>>,
     /// primitive type key (e.g. "int") → set of impl'd method names
     prim_methods: HashMap<String, HashSet<String>>,
+    /// true when `use sirin.io` was seen
+    io_imported: bool,
 }
 
 // True if any Stmt::Return in stmts (recursively) has value = Expr::Call(fn_name, _)
@@ -246,6 +248,7 @@ impl Emitter {
             class_methods: HashMap::new(),
             used_types: RefCell::new(HashSet::new()),
             prim_methods: HashMap::new(),
+            io_imported: false,
         }
     }
 
@@ -264,7 +267,6 @@ impl Emitter {
             ImplTarget::I8                => ("i8",    "int8_t"),
             ImplTarget::I16               => ("i16",   "int16_t"),
             ImplTarget::I32               => ("i32",   "int32_t"),
-            ImplTarget::I64               => ("i64",   "int64_t"),
         }
     }
 
@@ -769,19 +771,56 @@ impl Emitter {
                 }
             }
             Expr::Call(name, args) => {
-                let args_str = args
-                    .iter()
-                    .map(|a| self.emit_expr(&a.node))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                // Fallback constructors when no declared type is available.
-                // emit_stmt handles the typed case; these defaults use Int/Int.
                 match *name {
-                    "Vec"   => format!("sirin_vec_int_new({})", args_str),
-                    "Array" => format!("sirin_array_int_new({})", args_str),
-                    "Map"   => "sirin_map_str_int_new()".to_string(),
-                    "Set"   => "sirin_set_int_new()".to_string(),
-                    _       => format!("{}({})", name, args_str),
+                    "print" | "println" => {
+                        let newline = *name == "println";
+                        if let Some(arg) = args.first() {
+                            let arg_str = self.emit_expr(&arg.node);
+                            let arg_ty = self.get_expr(&arg.node);
+                            let (fmt, needs_addr) = match &arg_ty {
+                                Type::Str                         => ("%s", false),
+                                Type::Int | Type::I64             => ("%lld", false),
+                                Type::U8 | Type::U16 | Type::U32  => ("%u", false),
+                                Type::U64                         => ("%llu", false),
+                                Type::I8 | Type::I16 | Type::I32  => ("%d", false),
+                                Type::Float                       => ("%f", false),
+                                Type::Bool                        => ("%d", false),
+                                Type::Named(_)                    => ("%p", true),
+                                _                                 => ("%d", false),
+                            };
+                            let fmt_str = if newline {
+                                format!("{}\\n", fmt)
+                            } else {
+                                fmt.to_string()
+                            };
+                            let arg_c = if needs_addr {
+                                format!("&{}", arg_str)
+                            } else {
+                                arg_str
+                            };
+                            format!("printf(\"{}\", {})", fmt_str, arg_c)
+                        } else if newline {
+                            "printf(\"\\n\")".to_string()
+                        } else {
+                            "printf(\"\")".to_string()
+                        }
+                    }
+                    "readln" => "sirin_readln()".to_string(),
+                    _ => {
+                        let args_str = args
+                            .iter()
+                            .map(|a| self.emit_expr(&a.node))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        // Fallback constructors when no declared type is available.
+                        match *name {
+                            "Vec"   => format!("sirin_vec_int_new({})", args_str),
+                            "Array" => format!("sirin_array_int_new({})", args_str),
+                            "Map"   => "sirin_map_str_int_new()".to_string(),
+                            "Set"   => "sirin_set_int_new()".to_string(),
+                            _       => format!("{}({})", name, args_str),
+                        }
+                    }
                 }
             }
             Expr::Array(items) => {
@@ -869,7 +908,6 @@ impl Emitter {
                             Type::I8              => Some("i8"),
                             Type::I16             => Some("i16"),
                             Type::I32             => Some("i32"),
-                            Type::I64             => Some("i64"),
                             _ => None,
                         };
                         if let Some(pfx) = prefix {
@@ -989,7 +1027,11 @@ impl Emitter {
                     }
                 }
             },
-            Expr::Call(name, _) => self.fns.get(*name).cloned().unwrap_or(Type::Void),
+            Expr::Call(name, _) => match *name {
+                "print" | "println" => Type::Void,
+                "readln"            => Type::Str,
+                _                   => self.fns.get(*name).cloned().unwrap_or(Type::Void),
+            },
             Expr::Array(items) => {
                 let inner = items.first().map_or(Type::Int, |i| self.get_expr(&i.node));
                 Type::Array(Box::new(inner))
@@ -1049,7 +1091,8 @@ impl Emitter {
     pub fn emit_program_and_prefix<'a>(mut self, stmts: &'a [Spanned<Stmt<'a>>]) -> (String, String) {
         self.emit_top_level(stmts);
         let prefix = self.defines_prefix();
-        let program = format!("{}#include \"sirin_runtime.h\"\n\n{}", prefix, self.output);
+        let io = if self.io_imported { "#include <stdio.h>\n" } else { "" };
+        let program = format!("{}#include \"sirin_runtime.h\"\n{}\n{}", prefix, io, self.output);
         (program, prefix)
     }
 
@@ -1059,7 +1102,8 @@ impl Emitter {
     pub fn emit_program_tcc<'a>(mut self, stmts: &'a [Spanned<Stmt<'a>>]) -> (String, String) {
         self.emit_top_level(stmts);
         let prefix = self.defines_prefix();
-        let program = format!("{}typedef long long int64_t;\n\n{}", prefix, self.output);
+        let io = if self.io_imported { "#include <stdio.h>\n" } else { "" };
+        let program = format!("{}typedef long long int64_t;\n{}\n{}", prefix, io, self.output);
         (program, prefix)
     }
 
@@ -1072,6 +1116,14 @@ impl Emitter {
 
         for s in stmts {
             match &s.node {
+                Stmt::Use { path } => {
+                    let module = path.join(".");
+                    if module == "sirin.io" {
+                        self.io_imported = true;
+                    } else {
+                        self.output.push_str(&format!("/* use {} */\n\n", module));
+                    }
+                }
                 Stmt::Class { .. }     => class_stmts.push(s),
                 Stmt::Impl { .. }      => class_stmts.push(s),
                 Stmt::Interface { name, .. } => {
@@ -1106,7 +1158,8 @@ impl Emitter {
 
     pub fn finish(self) -> String {
         let prefix = self.defines_prefix();
-        format!("{}#include \"sirin_runtime.h\"\n\n{}", prefix, self.output)
+        let io = if self.io_imported { "#include <stdio.h>\n" } else { "" };
+        format!("{}#include \"sirin_runtime.h\"\n{}\n{}", prefix, io, self.output)
     }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sirin_diagnostics::report_error;
 use sirin_parser::{
@@ -44,6 +44,7 @@ pub struct Checker<'a> {
     classes: HashMap<String, ClassInfo>,
     interfaces: HashMap<String, Vec<InterfaceMethodInfo>>,
     primitive_impls: HashMap<String, HashMap<String, MethodInfo>>,
+    imported_modules: HashSet<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -54,6 +55,7 @@ impl<'a> Checker<'a> {
             classes: HashMap::new(),
             interfaces: HashMap::new(),
             primitive_impls: HashMap::new(),
+            imported_modules: HashSet::new(),
         }
     }
 
@@ -88,7 +90,6 @@ impl<'a> Checker<'a> {
             Type::I8              => Some("i8"),
             Type::I16             => Some("i16"),
             Type::I32             => Some("i32"),
-            Type::I64             => Some("i64"),
             _                     => None,
         }
     }
@@ -433,6 +434,12 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
 
+            Stmt::Use { path } => {
+                let module = path.join(".");
+                self.imported_modules.insert(module);
+                Ok(())
+            }
+
             _ => Ok(()),
         }
     }
@@ -547,6 +554,25 @@ impl<'a> Checker<'a> {
                 "Map" | "Set" => {
                     for arg in args { self.check_expr(arg)?; }
                     Ok(Type::Void)
+                }
+                "print" | "println" => {
+                    if !self.imported_modules.contains("sirin.io") {
+                        return Err(CheckerError::ModuleNotImported {
+                            module: "sirin.io".to_string(),
+                            function: name.to_string(),
+                        });
+                    }
+                    for arg in args { self.check_expr(arg)?; }
+                    Ok(Type::Void)
+                }
+                "readln" => {
+                    if !self.imported_modules.contains("sirin.io") {
+                        return Err(CheckerError::ModuleNotImported {
+                            module: "sirin.io".to_string(),
+                            function: "readln".to_string(),
+                        });
+                    }
+                    Ok(Type::Str)
                 }
                 _ => Ok(Type::Int), // TODO: resolução de fn
             },

@@ -2,12 +2,15 @@ use clap::ArgMatches;
 use chumsky::Parser;
 use chumsky::input::Input as _;
 use chumsky::span::SimpleSpan;
-use sirin_codegen_c::{TCC_DIR, TCC_RUNTIME_DIR, TCC_WIN32_DIR};
 use sirin_codegen_c::emit::Emitter;
 use sirin_codegen_c::runtime;
-use sirin_codegen_c::tinycc::{TCC_OUTPUT_EXE, Tcc};
 use sirin_parser::parser::parser;
 use sirin_typechecker::checker::Checker;
+
+#[cfg(windows)]
+use sirin_codegen_c::{TCC_DIR, TCC_RUNTIME_DIR, TCC_WIN32_DIR};
+#[cfg(windows)]
+use sirin_codegen_c::tinycc::{TCC_OUTPUT_EXE, Tcc};
 
 fn file_kb(path: &std::path::Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|m| (m.len() + 512) / 1024)
@@ -63,6 +66,77 @@ pub fn execute(matches: &ArgMatches) {
     // defines_prefix must be prepended to the runtime source so #ifdef guards activate
     let (c_src, defines_prefix) = Emitter::new().emit_program_and_prefix(&stmts);
 
+    let out_str = out_path.to_string_lossy().into_owned();
+
+    #[cfg(not(windows))]
+    compile_unix(&c_src, &defines_prefix, &out_str);
+
+    #[cfg(windows)]
+    compile_windows(&c_src, &defines_prefix, &out_str);
+
+    let size_after = file_kb(&out_path).unwrap_or(0);
+
+    println!("{}", out_str);
+
+    match size_before {
+        Some(before) => println!("tamanho: {}KB → {}KB", before, size_after),
+        None         => println!("tamanho: {}KB", size_after),
+    }
+}
+
+#[cfg(not(windows))]
+fn compile_unix(c_src: &str, defines_prefix: &str, out: &str) {
+    let tmp = std::env::temp_dir();
+    let h_path  = tmp.join("sirin_runtime.h");
+    let c_rt    = tmp.join("sirin_runtime.c");
+    let c_prog  = tmp.join("sirin_program.c");
+
+    if let Err(e) = std::fs::write(&h_path, runtime::RUNTIME_H) {
+        eprintln!("error: cannot write runtime header: {}", e);
+        std::process::exit(1);
+    }
+    let runtime_with_defines = format!("{}{}", defines_prefix, runtime::RUNTIME_C);
+    if let Err(e) = std::fs::write(&c_rt, &runtime_with_defines) {
+        eprintln!("error: cannot write runtime source: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = std::fs::write(&c_prog, c_src) {
+        eprintln!("error: cannot write program source: {}", e);
+        std::process::exit(1);
+    }
+
+    // prefer cc → clang → gcc
+    let compiler = ["cc", "clang", "gcc"]
+        .iter()
+        .find(|&&cmd| std::process::Command::new(cmd).arg("--version").output().is_ok())
+        .copied()
+        .unwrap_or("cc");
+
+    let status = std::process::Command::new(compiler)
+        .args([
+            c_rt.to_str().unwrap(),
+            c_prog.to_str().unwrap(),
+            "-I", tmp.to_str().unwrap(),
+            "-o", out,
+            "-O2",
+        ])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("compile error: compiler exited with {}", s);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("compile error: cannot run compiler: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn compile_windows(c_src: &str, defines_prefix: &str, out: &str) {
     let tcc = match Tcc::new() {
         Ok(t) => t,
         Err(e) => {
@@ -93,7 +167,6 @@ pub fn execute(matches: &ArgMatches) {
         std::process::exit(1);
     }
 
-    // Write sirin_runtime.h to temp dir so TCC can resolve #include "sirin_runtime.h"
     let tmp = std::env::temp_dir();
     if let Err(e) = std::fs::write(tmp.join("sirin_runtime.h"), runtime::RUNTIME_H) {
         eprintln!("error: cannot write runtime header to temp: {}", e);
@@ -109,50 +182,32 @@ pub fn execute(matches: &ArgMatches) {
         eprintln!("tcc error: {}", e);
         std::process::exit(1);
     }
-
     if let Err(e) = tcc.set_options("-s") {
         eprintln!("tcc error: {}", e);
         std::process::exit(1);
     }
-
     if let Err(e) = tcc.set_options("-Os") {
         eprintln!("tcc error: {}", e);
         std::process::exit(1);
     }
 
-    // CRT startup — provides _start / mainCRTStartup which calls main()
     let crt1 = format!("{}/lib/crt1.c", TCC_WIN32_DIR);
     if let Err(e) = tcc.add_file(&crt1) {
         eprintln!("tcc error (crt1): {}", e);
         std::process::exit(1);
     }
 
-    // Compile the sirin runtime with conditional-type defines prepended
     let runtime_with_defines = format!("{}{}", defines_prefix, runtime::RUNTIME_C);
     if let Err(e) = tcc.compile_string(&runtime_with_defines) {
         eprintln!("runtime compile error:\n{}", e);
         std::process::exit(1);
     }
-
-    // Compile the generated program (already has defines at top)
-    if let Err(e) = tcc.compile_string(&c_src) {
+    if let Err(e) = tcc.compile_string(c_src) {
         eprintln!("compile error:\n{}", e);
         std::process::exit(1);
     }
-
-    let out_str = out_path.to_string_lossy();
-
-    if let Err(e) = tcc.output_file(&out_str) {
+    if let Err(e) = tcc.output_file(out) {
         eprintln!("link error: {}", e);
         std::process::exit(1);
-    }
-
-    let size_after = file_kb(&out_path).unwrap_or(0);
-
-    println!("{}", out_str);
-
-    match size_before {
-        Some(before) => println!("tamanho: {}KB → {}KB", before, size_after),
-        None         => println!("tamanho: {}KB", size_after),
     }
 }

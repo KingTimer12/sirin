@@ -74,6 +74,8 @@ pub enum Tokens<'a> {
     Mut,
     #[token("self")]
     SelfKw,
+    #[token("use")]
+    Use,
 
     // Function tokens
     #[token("fn")]

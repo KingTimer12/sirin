@@ -278,3 +278,11 @@ SIRIN_MAP_STR_IMPL(Str,   str,   SirinCStr)
 #ifdef SIRIN_USE_MAP_STR_FLOAT
 SIRIN_MAP_STR_IMPL(Float, float, double)
 #endif
+
+const char* sirin_readln(void) {
+    static char buf[1024];
+    if (!fgets(buf, sizeof(buf), stdin)) return "";
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len-1] == '\n') buf[--len] = '\0';
+    return buf;
+}
