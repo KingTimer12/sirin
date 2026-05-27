@@ -1,0 +1,159 @@
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #pragma comment(lib, "ws2_32.lib")
+    #define SIRIN_SOCK_INIT() do { WSADATA _w; WSAStartup(MAKEWORD(2,2), &_w); } while(0)
+    #define SIRIN_SOCK_CLOSE(fd) closesocket(fd)
+    typedef int socklen_t;
+#else
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <unistd.h>
+    #define SIRIN_SOCK_INIT() do {} while(0)
+    #define SIRIN_SOCK_CLOSE(fd) close(fd)
+#endif
+
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "sirin_net.h"
+
+void sirin_net_init(void) {
+    SIRIN_SOCK_INIT();
+}
+
+/* ── helpers ── */
+
+static struct sockaddr_in make_addr(const char* addr, int port) {
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family      = AF_INET;
+    sa.sin_port        = htons((unsigned short)port);
+    sa.sin_addr.s_addr = inet_addr(addr);
+    return sa;
+}
+
+/* ── TcpListener ── */
+
+SirinTcpListener sirin_tcp_listener_bind(const char* addr, int port) {
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { fprintf(stderr, "sirin_net: socket() failed\n"); exit(1); }
+
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
+
+    struct sockaddr_in sa = make_addr(addr, port);
+    if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
+        fprintf(stderr, "sirin_net: bind() failed on %s:%d\n", addr, port);
+        exit(1);
+    }
+    if (listen(fd, 128) < 0) {
+        fprintf(stderr, "sirin_net: listen() failed\n");
+        exit(1);
+    }
+    SirinTcpListener l;
+    l.fd = fd;
+    return l;
+}
+
+SirinTcpStream sirin_tcp_listener_accept(SirinTcpListener* l) {
+    struct sockaddr_in client;
+    socklen_t len = sizeof(client);
+    int cfd = (int)accept(l->fd, (struct sockaddr*)&client, &len);
+    if (cfd < 0) { fprintf(stderr, "sirin_net: accept() failed\n"); exit(1); }
+    SirinTcpStream s;
+    s.fd = cfd;
+    return s;
+}
+
+void sirin_tcp_listener_close(SirinTcpListener* l) {
+    SIRIN_SOCK_CLOSE(l->fd);
+    l->fd = -1;
+}
+
+/* ── TcpStream ── */
+
+SirinTcpStream sirin_tcp_stream_connect(const char* addr, int port) {
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { fprintf(stderr, "sirin_net: socket() failed\n"); exit(1); }
+    struct sockaddr_in sa = make_addr(addr, port);
+    if (connect(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
+        fprintf(stderr, "sirin_net: connect() failed to %s:%d\n", addr, port);
+        exit(1);
+    }
+    SirinTcpStream s;
+    s.fd = fd;
+    return s;
+}
+
+const char* sirin_tcp_stream_read(SirinTcpStream* s) {
+    char* buf = (char*)malloc(SIRIN_TCP_READ_BUF);
+    if (!buf) { fprintf(stderr, "sirin_net: malloc failed\n"); exit(1); }
+    int n = (int)recv(s->fd, buf, SIRIN_TCP_READ_BUF - 1, 0);
+    if (n < 0) { fprintf(stderr, "sirin_net: recv() failed\n"); exit(1); }
+    buf[n] = '\0';
+    return buf;
+}
+
+void sirin_tcp_stream_write(SirinTcpStream* s, const char* data) {
+    size_t total = strlen(data);
+    size_t sent  = 0;
+    while (sent < total) {
+        int n = (int)send(s->fd, data + sent, (int)(total - sent), 0);
+        if (n <= 0) { fprintf(stderr, "sirin_net: send() failed\n"); exit(1); }
+        sent += (size_t)n;
+    }
+}
+
+void sirin_tcp_stream_close(SirinTcpStream* s) {
+    SIRIN_SOCK_CLOSE(s->fd);
+    s->fd = -1;
+}
+
+/* ── UdpSocket ── */
+
+SirinUdpSocket sirin_udp_socket_bind(const char* addr, int port) {
+    int fd = (int)socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) { fprintf(stderr, "sirin_net: socket() failed\n"); exit(1); }
+    struct sockaddr_in sa = make_addr(addr, port);
+    if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
+        fprintf(stderr, "sirin_net: udp bind() failed on %s:%d\n", addr, port);
+        exit(1);
+    }
+    SirinUdpSocket sock;
+    sock.fd = fd;
+    return sock;
+}
+
+SirinUdpPacket sirin_udp_socket_recv_from(SirinUdpSocket* s) {
+    char* buf = (char*)malloc(SIRIN_TCP_READ_BUF);
+    if (!buf) { fprintf(stderr, "sirin_net: malloc failed\n"); exit(1); }
+    struct sockaddr_in from;
+    socklen_t fromlen = sizeof(from);
+    int n = (int)recvfrom(s->fd, buf, SIRIN_TCP_READ_BUF - 1, 0,
+                          (struct sockaddr*)&from, &fromlen);
+    if (n < 0) { fprintf(stderr, "sirin_net: recvfrom() failed\n"); exit(1); }
+    buf[n] = '\0';
+
+    SirinUdpPacket pkt;
+    pkt.data = buf;
+    pkt.port = ntohs(from.sin_port);
+    const char* ip = inet_ntoa(from.sin_addr);
+    strncpy(pkt.addr, ip ? ip : "", 63);
+    pkt.addr[63] = '\0';
+    return pkt;
+}
+
+void sirin_udp_socket_send_to(SirinUdpSocket* s, const char* addr, int port, const char* data) {
+    struct sockaddr_in sa = make_addr(addr, port);
+    size_t total = strlen(data);
+    int n = (int)sendto(s->fd, data, (int)total, 0,
+                        (struct sockaddr*)&sa, sizeof(sa));
+    if (n < 0) { fprintf(stderr, "sirin_net: sendto() failed\n"); exit(1); }
+}
+
+void sirin_udp_socket_close(SirinUdpSocket* s) {
+    SIRIN_SOCK_CLOSE(s->fd);
+    s->fd = -1;
+}

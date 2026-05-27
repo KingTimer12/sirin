@@ -1,0 +1,22 @@
+use sirin.io
+use sirin.async
+use sirin.net
+
+async fn handle_client(conn: TcpStream, id: int) {
+    msg = conn.read().await
+    conn.write(msg)
+    return handle_client(conn, id)
+}
+
+async fn accept_loop(l: TcpListener, id: int) {
+    conn = l.accept().await
+    spawn {
+        handle_client(conn, id)
+    }
+    return accept_loop(l, id + 1)
+}
+
+listener = TcpListener("0.0.0.0", 3000)
+println("servidor ouvindo na porta 3000")
+
+accept_loop(listener, 1).await

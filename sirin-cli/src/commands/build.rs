@@ -87,6 +87,7 @@ pub fn execute(matches: &ArgMatches) {
         prim_methods: Default::default(),
         used_types: Default::default(),
         io_imported: false,
+        named_collection_decls: Default::default(),
     };
     let mut modules_c = String::new();
 
@@ -142,30 +143,31 @@ pub fn execute(matches: &ArgMatches) {
 
     let mut main_emitter = Emitter::new();
     main_emitter.absorb_exports(&all_exports);
-    let (main_body, defines_prefix, io_imported, async_imported) =
+    let (main_body, defines_prefix, io_imported, async_imported, net_imported, named_decls) =
         main_emitter.emit_body_and_prefix(&main_stmts);
 
-    let io_include = if io_imported { "#include <stdio.h>\n" } else { "" };
+    let io_include    = if io_imported    { "#include <stdio.h>\n" } else { "" };
     let async_include = if async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
+    let net_include   = if net_imported   { "#include \"sirin_net.h\"\n" } else { "" };
     let c_src = if modules_c.is_empty() {
         format!(
-            "{}#include \"sirin_runtime.h\"\n{}{}\n{}",
-            defines_prefix, async_include, io_include, main_body
+            "{}#include \"sirin_runtime.h\"\n{}{}{}{}\n{}",
+            defines_prefix, async_include, net_include, io_include, named_decls, main_body
         )
     } else {
         format!(
-            "{}#include \"sirin_runtime.h\"\n{}{}\n{}{}",
-            defines_prefix, async_include, io_include, modules_c, main_body
+            "{}#include \"sirin_runtime.h\"\n{}{}{}{}\n{}{}",
+            defines_prefix, async_include, net_include, io_include, named_decls, modules_c, main_body
         )
     };
 
     let out_str = out_path.to_string_lossy().into_owned();
 
     #[cfg(not(windows))]
-    compile_unix(&c_src, &defines_prefix, &out_str);
+    compile_unix(&c_src, &defines_prefix, &out_str, net_imported);
 
     #[cfg(windows)]
-    compile_windows(&c_src, &defines_prefix, &out_str);
+    compile_windows(&c_src, &defines_prefix, &out_str, net_imported);
 
     let size_after = file_kb(&out_path).unwrap_or(0);
     println!("{}", out_str);
@@ -176,13 +178,15 @@ pub fn execute(matches: &ArgMatches) {
 }
 
 #[cfg(not(windows))]
-fn compile_unix(c_src: &str, defines_prefix: &str, out: &str) {
+fn compile_unix(c_src: &str, defines_prefix: &str, out: &str, net_imported: bool) {
     let tmp = std::env::temp_dir();
-    let h_path     = tmp.join("sirin_runtime.h");
-    let c_rt       = tmp.join("sirin_runtime.c");
-    let c_async_h  = tmp.join("sirin_async.h");
-    let c_async    = tmp.join("sirin_async.c");
-    let c_prog     = tmp.join("sirin_program.c");
+    let h_path    = tmp.join("sirin_runtime.h");
+    let c_rt      = tmp.join("sirin_runtime.c");
+    let c_async_h = tmp.join("sirin_async.h");
+    let c_async   = tmp.join("sirin_async.c");
+    let c_net_h   = tmp.join("sirin_net.h");
+    let c_net     = tmp.join("sirin_net.c");
+    let c_prog    = tmp.join("sirin_program.c");
 
     if let Err(e) = std::fs::write(&h_path, runtime::RUNTIME_H) {
         eprintln!("error: cannot write runtime header: {}", e);
@@ -201,6 +205,16 @@ fn compile_unix(c_src: &str, defines_prefix: &str, out: &str) {
         eprintln!("error: cannot write async source: {}", e);
         std::process::exit(1);
     }
+    if net_imported {
+        if let Err(e) = std::fs::write(&c_net_h, runtime::NET_H) {
+            eprintln!("error: cannot write net header: {}", e);
+            std::process::exit(1);
+        }
+        if let Err(e) = std::fs::write(&c_net, runtime::NET_C) {
+            eprintln!("error: cannot write net source: {}", e);
+            std::process::exit(1);
+        }
+    }
     if let Err(e) = std::fs::write(&c_prog, c_src) {
         eprintln!("error: cannot write program source: {}", e);
         std::process::exit(1);
@@ -212,16 +226,23 @@ fn compile_unix(c_src: &str, defines_prefix: &str, out: &str) {
         .copied()
         .unwrap_or("cc");
 
+    let mut cmd_args: Vec<String> = vec![
+        c_rt.to_str().unwrap().to_owned(),
+        c_async.to_str().unwrap().to_owned(),
+    ];
+    if net_imported {
+        cmd_args.push(c_net.to_str().unwrap().to_owned());
+    }
+    cmd_args.push(c_prog.to_str().unwrap().to_owned());
+    cmd_args.extend_from_slice(&[
+        "-I".to_owned(), tmp.to_str().unwrap().to_owned(),
+        "-o".to_owned(), out.to_owned(),
+        "-O2".to_owned(),
+        "-Wno-deprecated-declarations".to_owned(),
+    ]);
+
     let status = std::process::Command::new(compiler)
-        .args([
-            c_rt.to_str().unwrap(),
-            c_async.to_str().unwrap(),
-            c_prog.to_str().unwrap(),
-            "-I", tmp.to_str().unwrap(),
-            "-o", out,
-            "-O2",
-            "-Wno-deprecated-declarations",
-        ])
+        .args(&cmd_args)
         .status();
 
     match status {
@@ -232,7 +253,7 @@ fn compile_unix(c_src: &str, defines_prefix: &str, out: &str) {
 }
 
 #[cfg(windows)]
-fn compile_windows(c_src: &str, defines_prefix: &str, out: &str) {
+fn compile_windows(c_src: &str, defines_prefix: &str, out: &str, _net_imported: bool) {
     let tcc = match Tcc::new() {
         Ok(t) => t,
         Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }

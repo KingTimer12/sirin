@@ -1,0 +1,21 @@
+use sirin.io
+use sirin.async
+use sirin.net
+
+async fn read_loop(conn: TcpStream) {
+    msg = conn.read().await
+    println(msg)
+    return read_loop(conn)
+}
+
+async fn write_loop(conn: TcpStream) {
+    line = readln()
+    conn.write(line)
+    return write_loop(conn)
+}
+
+conn = TcpStream.connect("127.0.0.1", 3000).await
+println("conectado ao servidor")
+
+read_loop(conn).await
+write_loop(conn).await

@@ -54,16 +54,22 @@ pub fn parser<'a>()
         just(Tokens::I64Type).to(Type::I64),
     )).boxed();
 
+    // ty_atom extended with Named (Ident) for collection element types
+    let ty_atom_or_named = choice((
+        ty_atom.clone(),
+        ident_name.clone().map(|n: &str| Type::Named(n.to_string())),
+    )).boxed();
+
     // Boxed: cloned 3 times (Array/Vec/Set) — Arc clone, O(1)
-    let bracket = ty_atom
+    let bracket = ty_atom_or_named
         .clone()
         .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket))
         .boxed();
 
-    let map_bracket = ty_atom
+    let map_bracket = ty_atom_or_named
         .clone()
         .then_ignore(just(Tokens::Comma))
-        .then(ty_atom.clone())
+        .then(ty_atom_or_named.clone())
         .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket));
 
     // Boxed: used in arg and return-type positions; stops type from infecting stmt chain

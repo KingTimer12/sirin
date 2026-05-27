@@ -34,6 +34,8 @@ pub struct Emitter {
     io_imported: bool,
     /// true when `use sirin.async` was seen
     async_imported: bool,
+    /// true when `use sirin.net` was seen
+    net_imported: bool,
     /// set of async fn names declared in this scope
     async_fns: HashSet<String>,
     /// async fn name → ordered (param_name, param_type)
@@ -42,6 +44,9 @@ pub struct Emitter {
     spawn_count: usize,
     /// top-level C declarations for spawn helper structs and functions
     spawn_decls: String,
+    /// inline C declarations for named-type collections (Vec[ClassName], etc.)
+    /// key = "Vec_ClassName", value = full C typedef + impl
+    named_collection_decls: RefCell<HashMap<String, String>>,
 }
 
 // True if any Stmt::Return in stmts (recursively) has value = Expr::Call(fn_name, _)
@@ -171,6 +176,104 @@ fn collection_suffix(ty: &Type) -> (&'static str, &'static str) {
     }
 }
 
+fn to_snake_case(s: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() && i > 0 { out.push('_'); }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
+/// Like collection_suffix but handles Type::Named by deriving Pascal/snake from the class name.
+fn collection_suffix_for(ty: &Type) -> (String, String) {
+    if let Type::Named(name) = ty {
+        return (name.clone(), to_snake_case(name));
+    }
+    let (a, b) = collection_suffix(ty);
+    (a.to_string(), b.to_string())
+}
+
+fn named_vec_impl(pascal: &str, snake: &str, c_type: &str) -> String {
+    format!(
+        "typedef struct {{ {c}* ptr; size_t len; size_t cap; }} SirinVec{P};\n\
+static SirinVec{P} sirin_vec_{s}_new(size_t ic) {{\n    size_t cap = ic > 0 ? ic : 4;\n\
+    {c}* buf = ({c}*)malloc(cap * sizeof({c}));\n    if (!buf) {{ fprintf(stderr, \"sirin: out of memory\\n\"); exit(1); }}\n\
+    SirinVec{P} v; v.ptr = buf; v.len = 0; v.cap = cap; return v;\n}}\n\
+static void sirin_vec_{s}_push(SirinVec{P}* v, {c} val) {{\n\
+    if (v->len == v->cap) {{ v->cap *= 2; v->ptr = ({c}*)realloc(v->ptr, v->cap * sizeof({c}));\n\
+        if (!v->ptr) {{ fprintf(stderr, \"sirin: out of memory\\n\"); exit(1); }} }}\n\
+    v->ptr[v->len++] = val;\n}}\n\
+static {c} sirin_vec_{s}_get(SirinVec{P}* v, size_t i) {{\n\
+    if (i >= v->len) {{ fprintf(stderr, \"sirin: vec index out of bounds\\n\"); exit(1); }}\n\
+    return v->ptr[i];\n}}\n\
+static void sirin_vec_{s}_free(SirinVec{P}* v) {{ free(v->ptr); v->ptr = NULL; v->len = 0; v->cap = 0; }}\n",
+        P = pascal, s = snake, c = c_type
+    )
+}
+
+fn named_array_impl(pascal: &str, snake: &str, c_type: &str) -> String {
+    format!(
+        "typedef struct {{ {c}* ptr; size_t len; size_t cap; }} SirinArray{P};\n\
+static SirinArray{P} sirin_array_{s}_new(size_t ic) {{\n    size_t cap = ic > 0 ? ic : 4;\n\
+    {c}* buf = ({c}*)malloc(cap * sizeof({c}));\n    if (!buf) {{ fprintf(stderr, \"sirin: out of memory\\n\"); exit(1); }}\n\
+    SirinArray{P} v; v.ptr = buf; v.len = 0; v.cap = cap; return v;\n}}\n\
+static void sirin_array_{s}_push(SirinArray{P}* v, {c} val) {{\n\
+    if (v->len == v->cap) {{ v->cap *= 2; v->ptr = ({c}*)realloc(v->ptr, v->cap * sizeof({c}));\n\
+        if (!v->ptr) {{ fprintf(stderr, \"sirin: out of memory\\n\"); exit(1); }} }}\n\
+    v->ptr[v->len++] = val;\n}}\n\
+static {c} sirin_array_{s}_get(SirinArray{P}* v, size_t i) {{\n\
+    if (i >= v->len) {{ fprintf(stderr, \"sirin: array index out of bounds\\n\"); exit(1); }}\n\
+    return v->ptr[i];\n}}\n\
+static void sirin_array_{s}_free(SirinArray{P}* v) {{ free(v->ptr); v->ptr = NULL; v->len = 0; v->cap = 0; }}\n",
+        P = pascal, s = snake, c = c_type
+    )
+}
+
+fn named_set_impl(pascal: &str, snake: &str, c_type: &str) -> String {
+    format!(
+        "typedef struct {{ {c}* ptr; size_t len; size_t cap; }} SirinSet{P};\n\
+static SirinSet{P} sirin_set_{s}_new(void) {{\n    size_t cap = 4;\n\
+    {c}* p = ({c}*)malloc(cap * sizeof({c}));\n    if (!p) {{ fprintf(stderr, \"sirin: out of memory\\n\"); exit(1); }}\n\
+    SirinSet{P} s; s.ptr = p; s.len = 0; s.cap = cap; return s;\n}}\n\
+static int sirin_set_{s}_contains(SirinSet{P}* s, {c} val) {{\n\
+    for (size_t i = 0; i < s->len; i++) if (memcmp(&s->ptr[i], &val, sizeof({c})) == 0) return 1;\n    return 0;\n}}\n\
+static void sirin_set_{s}_insert(SirinSet{P}* s, {c} val) {{\n\
+    if (sirin_set_{s}_contains(s, val)) return;\n\
+    if (s->len == s->cap) {{ s->cap *= 2; s->ptr = ({c}*)realloc(s->ptr, s->cap * sizeof({c}));\n\
+        if (!s->ptr) {{ fprintf(stderr, \"sirin: out of memory\\n\"); exit(1); }} }}\n\
+    s->ptr[s->len++] = val;\n}}\n\
+static void sirin_set_{s}_free(SirinSet{P}* s) {{ free(s->ptr); s->ptr = NULL; s->len = 0; s->cap = 0; }}\n",
+        P = pascal, s = snake, c = c_type
+    )
+}
+
+fn named_map_impl(pascal: &str, snake: &str, c_type: &str) -> String {
+    format!(
+        "typedef struct {{ char** keys; {c}* vals; size_t len; size_t cap; }} SirinMapStr{P};\n\
+static SirinMapStr{P} sirin_map_str_{s}_new(void) {{\n    size_t cap = 4;\n\
+    char** ks = (char**)malloc(cap * sizeof(char*));\n\
+    {c}* vs = ({c}*)malloc(cap * sizeof({c}));\n\
+    if (!ks || !vs) {{ fprintf(stderr, \"sirin: out of memory\\n\"); exit(1); }}\n\
+    SirinMapStr{P} m; m.keys = ks; m.vals = vs; m.len = 0; m.cap = cap; return m;\n}}\n\
+static void sirin_map_str_{s}_insert(SirinMapStr{P}* m, const char* key, {c} val) {{\n\
+    for (size_t i = 0; i < m->len; i++) if (strcmp(m->keys[i], key) == 0) {{ m->vals[i] = val; return; }}\n\
+    if (m->len == m->cap) {{ m->cap *= 2;\n\
+        m->keys = (char**)realloc(m->keys, m->cap * sizeof(char*));\n\
+        m->vals = ({c}*)realloc(m->vals, m->cap * sizeof({c}));\n\
+        if (!m->keys || !m->vals) {{ fprintf(stderr, \"sirin: out of memory\\n\"); exit(1); }} }}\n\
+    size_t kl = strlen(key); char* k = (char*)malloc(kl + 1); memcpy(k, key, kl); k[kl] = 0;\n\
+    m->keys[m->len] = k; m->vals[m->len] = val; m->len++;\n}}\n\
+static {c} sirin_map_str_{s}_get(SirinMapStr{P}* m, const char* key) {{\n\
+    for (size_t i = 0; i < m->len; i++) if (strcmp(m->keys[i], key) == 0) return m->vals[i];\n\
+    fprintf(stderr, \"sirin: map key not found\\n\"); exit(1);\n}}\n\
+static void sirin_map_str_{s}_free(SirinMapStr{P}* m) {{\n\
+    for (size_t i = 0; i < m->len; i++) free(m->keys[i]);\n\
+    free(m->keys); free(m->vals); m->keys = NULL; m->vals = NULL; m->len = 0; m->cap = 0;\n}}\n",
+        P = pascal, s = snake, c = c_type
+    )
+}
+
 fn integer_rank(ty: &Type) -> u8 {
     match ty {
         Type::U8  => 1,
@@ -188,6 +291,10 @@ fn integer_rank(ty: &Type) -> u8 {
 /// Maps a Sirin collection type to its conditional-compilation define name.
 fn ty_to_define(ty: &Type) -> Option<&'static str> {
     match ty {
+        Type::Vec(inner) | Type::Array(inner) | Type::Set(inner)
+            if matches!(inner.as_ref(), Type::Named(_)) => return None,
+        Type::Map(_, val)
+            if matches!(val.as_ref(), Type::Named(_)) => return None,
         Type::Vec(inner) => Some(match collection_suffix(inner).0 {
             "Int"   => "SIRIN_USE_VEC_INT",
             "U8"    => "SIRIN_USE_VEC_U8",
@@ -248,6 +355,7 @@ pub struct ModuleExports {
     pub class_methods: HashMap<String, HashMap<String, Type>>,
     pub prim_methods: HashMap<String, HashSet<String>>,
     pub used_types: HashSet<String>,
+    pub named_collection_decls: HashMap<String, String>,
     pub io_imported: bool,
 }
 
@@ -270,10 +378,12 @@ impl Emitter {
             prim_methods: HashMap::new(),
             io_imported: false,
             async_imported: false,
+            net_imported: false,
             async_fns: HashSet::new(),
             async_fn_params: HashMap::new(),
             spawn_count: 0,
             spawn_decls: String::new(),
+            named_collection_decls: RefCell::new(HashMap::new()),
         }
     }
 
@@ -297,10 +407,12 @@ impl Emitter {
             prim_methods: self.prim_methods.clone(),
             io_imported: self.io_imported,
             async_imported: true,
+            net_imported: self.net_imported,
             async_fns: self.async_fns.clone(),
             async_fn_params: self.async_fn_params.clone(),
             spawn_count: self.spawn_count,
             spawn_decls: String::new(),
+            named_collection_decls: RefCell::new(self.named_collection_decls.borrow().clone()),
         }
     }
 
@@ -319,6 +431,7 @@ impl Emitter {
             self.prim_methods.entry(k.clone()).or_default().extend(v.clone());
         }
         self.used_types.borrow_mut().extend(exports.used_types.clone());
+        self.named_collection_decls.borrow_mut().extend(exports.named_collection_decls.clone());
         if exports.io_imported {
             self.io_imported = true;
         }
@@ -333,9 +446,9 @@ impl Emitter {
         for s in stmts {
             match &s.node {
                 Stmt::Use { path } => {
-                    if path.join(".") == "sirin.io" {
-                        self.io_imported = true;
-                    }
+                    let m = path.join(".");
+                    if m == "sirin.io"  { self.io_imported  = true; }
+                    if m == "sirin.net" { self.net_imported  = true; }
                 }
                 Stmt::Class { .. } | Stmt::Impl { .. } => class_stmts.push(s),
                 Stmt::Interface { name, .. } => {
@@ -358,21 +471,23 @@ impl Emitter {
             class_methods: self.class_methods.clone(),
             prim_methods: self.prim_methods.clone(),
             used_types: self.used_types.borrow().clone(),
+            named_collection_decls: self.named_collection_decls.borrow().clone(),
             io_imported: self.io_imported,
         };
 
         (self.output, exports)
     }
 
-    /// Like `emit_program_and_prefix` but returns raw `(body, defines_prefix, io_imported)`.
+    /// Like `emit_program_and_prefix` but returns raw `(body, defines_prefix, io_imported, async_imported, net_imported)`.
     /// Lets the caller inject module code between the includes and main body.
     pub fn emit_body_and_prefix<'a>(
         mut self,
         stmts: &'a [Spanned<Stmt<'a>>],
-    ) -> (String, String, bool, bool) {
+    ) -> (String, String, bool, bool, bool, String) {
         self.emit_top_level(stmts);
         let prefix = self.defines_prefix();
-        (self.output, prefix, self.io_imported, self.async_imported)
+        let named_decls = self.named_collection_decls_string();
+        (self.output, prefix, self.io_imported, self.async_imported, self.net_imported, named_decls)
     }
 
 } // end impl Emitter (helpers below)
@@ -565,7 +680,7 @@ impl Emitter {
                             ));
                         }
                         Type::Vec(inner) => {
-                            let (_, snake) = collection_suffix(inner);
+                            let (_, snake) = collection_suffix_for(inner);
                             let c_ty = self.type_to_c(ty);
                             self.output.push_str(&format!(
                                 "{}{} {} = sirin_vec_{}_new({});\n",
@@ -599,7 +714,7 @@ impl Emitter {
                 if let Expr::Call(ctor, ctor_args) = &rhs.node {
                     let line: Option<String> = match (*ctor, ty) {
                         ("Vec", Type::Vec(inner)) => {
-                            let (_, snake) = collection_suffix(inner);
+                            let (_, snake) = collection_suffix_for(inner);
                             let cap = ctor_args.first()
                                 .map(|a| self.emit_expr(&a.node))
                                 .unwrap_or_else(|| "4".to_string());
@@ -609,7 +724,7 @@ impl Emitter {
                             ))
                         }
                         ("Array", Type::Array(inner)) => {
-                            let (_, snake) = collection_suffix(inner);
+                            let (_, snake) = collection_suffix_for(inner);
                             let cap = ctor_args.first()
                                 .map(|a| self.emit_expr(&a.node))
                                 .unwrap_or_else(|| "4".to_string());
@@ -619,14 +734,14 @@ impl Emitter {
                             ))
                         }
                         ("Map", Type::Map(_, val)) => {
-                            let (_, vs) = collection_suffix(val);
+                            let (_, vs) = collection_suffix_for(val);
                             Some(format!(
                                 "{}{} {} = sirin_map_str_{}_new();\n",
                                 self.indent(), self.type_to_c(ty), name.node, vs
                             ))
                         }
                         ("Set", Type::Set(inner)) => {
-                            let (_, snake) = collection_suffix(inner);
+                            let (_, snake) = collection_suffix_for(inner);
                             Some(format!(
                                 "{}{} {} = sirin_set_{}_new();\n",
                                 self.indent(), self.type_to_c(ty), name.node, snake
@@ -753,6 +868,10 @@ impl Emitter {
                     .collect::<Vec<_>>()
                     .join(", ");
 
+                // Mark where this fn starts so body-level spawn_decls can be spliced before it
+                let fn_start_pos = self.output.len();
+                let spawn_decls_before = self.spawn_decls.len();
+
                 self.output.push_str(&format!(
                     "{}{} {}({}) {{\n",
                     self.indent(),
@@ -787,6 +906,16 @@ impl Emitter {
                 self.depth -= 1;
 
                 self.output.push_str(&format!("{}}}\n", self.indent()));
+
+                // Splice any spawn_decls generated inside this fn's body to appear before the fn
+                if self.spawn_decls.len() > spawn_decls_before {
+                    let new_decls = self.spawn_decls[spawn_decls_before..].to_string();
+                    self.spawn_decls.truncate(spawn_decls_before);
+                    let fn_code = self.output[fn_start_pos..].to_string();
+                    self.output.truncate(fn_start_pos);
+                    self.output.push_str(&new_decls);
+                    self.output.push_str(&fn_code);
+                }
             }
             Stmt::If { cond, then, else_ } => {
                 let cond_str = self.emit_expr(&cond.node);
@@ -868,9 +997,11 @@ impl Emitter {
                 for s in body {
                     sub.emit_stmt(&s.node);
                 }
-                // Propagate used_types back
+                // Propagate used_types + named_collection_decls back
                 let sub_used = sub.used_types.into_inner();
                 self.used_types.borrow_mut().extend(sub_used);
+                let sub_named = sub.named_collection_decls.into_inner();
+                self.named_collection_decls.borrow_mut().extend(sub_named);
                 decl.push_str(&sub.output);
                 decl.push_str("}\n\n");
 
@@ -1193,7 +1324,7 @@ impl Emitter {
                 let i = self.emit_expr(&idx.node);
                 match self.get_expr(&base.node) {
                     Type::Vec(inner) => {
-                        let (_, s) = collection_suffix(&inner);
+                        let (_, s) = collection_suffix_for(&inner);
                         format!("sirin_vec_{}_get(&{}, {})", s, b, i)
                     }
                     // Array is stack-allocated; use C direct subscript
@@ -1202,6 +1333,13 @@ impl Emitter {
                 }
             }
             Expr::MethodCall(obj, method, args) => {
+                // Static net constructors: TcpStream.connect(addr, port)
+                if matches!(&obj.node, Expr::Var("TcpStream") | Expr::NewDefault("TcpStream")) {
+                    if *method == "connect" {
+                        let args_str = args.iter().map(|a| self.emit_expr(&a.node)).collect::<Vec<_>>().join(", ");
+                        return format!("sirin_tcp_stream_connect({})", args_str);
+                    }
+                }
                 let obj_str = self.emit_expr(&obj.node);
                 let obj_ty  = self.get_expr(&obj.node);
                 let args_str = args
@@ -1224,14 +1362,14 @@ impl Emitter {
                         _ => format!("{}.{}({})", obj_str, method, args_str),
                     },
                     Type::Vec(inner) => {
-                        let (_, s) = collection_suffix(&inner);
+                        let (_, s) = collection_suffix_for(&inner);
                         match *method {
                             "push" => format!("sirin_vec_{}_push(&{}, {})", s, obj_str, args_str),
                             _      => format!("sirin_vec_{}_get(&{}, {})",  s, obj_str, args_str),
                         }
                     }
                     Type::Array(inner) => {
-                        let (_, s) = collection_suffix(&inner);
+                        let (_, s) = collection_suffix_for(&inner);
                         match *method {
                             "push" => format!("sirin_array_{}_push(&{}, {})", s, obj_str, args_str),
                             _      => format!("sirin_array_{}_get(&{}, {})",  s, obj_str, args_str),
@@ -1245,7 +1383,7 @@ impl Emitter {
                         }
                     }
                     Type::Set(inner) => {
-                        let (_, s) = collection_suffix(&inner);
+                        let (_, s) = collection_suffix_for(&inner);
                         match *method {
                             "insert"   => format!("sirin_set_{}_insert(&{}, {})",   s, obj_str, args_str),
                             "contains" => format!("sirin_set_{}_contains(&{}, {})", s, obj_str, args_str),
@@ -1253,6 +1391,33 @@ impl Emitter {
                         }
                     }
                     Type::Named(cls) => {
+                        // Net type static constructor: TcpStream.connect(addr, port)
+                        if matches!(&obj.node, Expr::NewDefault("TcpStream") | Expr::Var("TcpStream")) {
+                            if *method == "connect" {
+                                return format!("sirin_tcp_stream_connect({})", args_str);
+                            }
+                        }
+                        // Net type methods
+                        match cls.as_str() {
+                            "TcpListener" => match *method {
+                                "accept" => return format!("sirin_tcp_listener_accept(&{})", obj_str),
+                                "close"  => return format!("sirin_tcp_listener_close(&{})", obj_str),
+                                _ => {}
+                            },
+                            "TcpStream" => match *method {
+                                "read"  => return format!("sirin_tcp_stream_read(&{})", obj_str),
+                                "write" => return format!("sirin_tcp_stream_write(&{}, {})", obj_str, args_str),
+                                "close" => return format!("sirin_tcp_stream_close(&{})", obj_str),
+                                _ => {}
+                            },
+                            "UdpSocket" => match *method {
+                                "recv_from" => return format!("sirin_udp_socket_recv_from(&{})", obj_str),
+                                "send_to"   => return format!("sirin_udp_socket_send_to(&{}, {})", obj_str, args_str),
+                                "close"     => return format!("sirin_udp_socket_close(&{})", obj_str),
+                                _ => {}
+                            },
+                            _ => {}
+                        }
                         // self is already a pointer in method context; other objects need &
                         let is_self_ptr = matches!(&obj.node, Expr::Var("self"))
                             && !self.method_field_paths.is_empty();
@@ -1312,7 +1477,11 @@ impl Emitter {
             Expr::New(name, args) => {
                 if *name == "Channel" { return "sirin_channel_new()".to_string(); }
                 let args_str = args.iter().map(|a| self.emit_expr(&a.node)).collect::<Vec<_>>().join(", ");
-                format!("{}_new({})", name, args_str)
+                match *name {
+                    "TcpListener" => format!("sirin_tcp_listener_bind({})", args_str),
+                    "UdpSocket"   => format!("sirin_udp_socket_bind({})", args_str),
+                    _             => format!("{}_new({})", name, args_str),
+                }
             }
             Expr::NewDefault(name) => {
                 if *name == "Channel" { return "sirin_channel_new()".to_string(); }
@@ -1363,11 +1532,45 @@ impl Emitter {
             Type::Bool => "int".to_string(),
             Type::Void => "void".to_string(),
             Type::Nullable(inner) => format!("{}*", self.type_to_c(inner)),
-            Type::Vec(inner)   => format!("SirinVec{}", collection_suffix(inner).0),
-            Type::Array(inner) => format!("SirinArray{}", collection_suffix(inner).0),
-            Type::Set(inner)   => format!("SirinSet{}", collection_suffix(inner).0),
-            Type::Map(_, val)  => format!("SirinMapStr{}", collection_suffix(val).0),
-            Type::Named(n) => n.clone(),
+            Type::Vec(inner) => {
+                let (pascal, snake) = collection_suffix_for(inner);
+                if let Type::Named(_) = inner.as_ref() {
+                    let ct = self.type_to_c(inner);
+                    self.register_named_collection("Vec", &pascal, &snake, &ct);
+                }
+                format!("SirinVec{pascal}")
+            }
+            Type::Array(inner) => {
+                let (pascal, snake) = collection_suffix_for(inner);
+                if let Type::Named(_) = inner.as_ref() {
+                    let ct = self.type_to_c(inner);
+                    self.register_named_collection("Array", &pascal, &snake, &ct);
+                }
+                format!("SirinArray{pascal}")
+            }
+            Type::Set(inner) => {
+                let (pascal, snake) = collection_suffix_for(inner);
+                if let Type::Named(_) = inner.as_ref() {
+                    let ct = self.type_to_c(inner);
+                    self.register_named_collection("Set", &pascal, &snake, &ct);
+                }
+                format!("SirinSet{pascal}")
+            }
+            Type::Map(_, val) => {
+                let (pascal, snake) = collection_suffix_for(val);
+                if let Type::Named(_) = val.as_ref() {
+                    let ct = self.type_to_c(val);
+                    self.register_named_collection("Map", &pascal, &snake, &ct);
+                }
+                format!("SirinMapStr{pascal}")
+            }
+            Type::Named(n) => match n.as_str() {
+                "TcpListener" => "SirinTcpListener".to_string(),
+                "TcpStream"   => "SirinTcpStream".to_string(),
+                "UdpSocket"   => "SirinUdpSocket".to_string(),
+                "UdpPacket"   => "SirinUdpPacket".to_string(),
+                _             => n.clone(),
+            },
             Type::Channel(_) => "SirinChannel*".to_string(),
         };
         if let Some(define) = ty_to_define(ty) {
@@ -1420,6 +1623,10 @@ impl Emitter {
                 other => other,
             },
             Expr::MethodCall(obj, method, _) => {
+                // Static net constructors: TcpStream.connect(...)
+                if matches!(&obj.node, Expr::Var("TcpStream") | Expr::NewDefault("TcpStream")) {
+                    if *method == "connect" { return Type::Named("TcpStream".to_string()); }
+                }
                 let obj_ty = self.get_expr(&obj.node);
                 match &obj_ty {
                     Type::Channel(inner) => match *method {
@@ -1439,6 +1646,25 @@ impl Emitter {
                         _ => Type::Void,
                     },
                     Type::Named(cls) => {
+                        // Net static constructor
+                        if matches!(&obj.node, Expr::NewDefault("TcpStream") | Expr::Var("TcpStream")) && *method == "connect" {
+                            return Type::Named("TcpStream".to_string());
+                        }
+                        match cls.as_str() {
+                            "TcpListener" => match *method {
+                                "accept" => return Type::Named("TcpStream".to_string()),
+                                _ => return Type::Void,
+                            },
+                            "TcpStream" => match *method {
+                                "read" => return Type::Str,
+                                _ => return Type::Void,
+                            },
+                            "UdpSocket" => match *method {
+                                "recv_from" => return Type::Named("UdpPacket".to_string()),
+                                _ => return Type::Void,
+                            },
+                            _ => {}
+                        }
                         self.class_methods
                             .get(cls.as_str())
                             .and_then(|m| m.get(*method))
@@ -1451,6 +1677,14 @@ impl Emitter {
             Expr::FieldAccess(obj, field) => {
                 let obj_ty = self.get_expr(&obj.node);
                 if let Type::Named(cls) = &obj_ty {
+                    // UdpPacket field types
+                    if cls == "UdpPacket" {
+                        return match *field {
+                            "data" | "addr" => Type::Str,
+                            "port"          => Type::Int,
+                            _               => Type::Void,
+                        };
+                    }
                     if let Some(fields) = self.classes.get(cls.as_str()) {
                         if let Some((_, ty)) = fields.iter().find(|(n, _)| n.as_str() == *field) {
                             return ty.clone();
@@ -1477,7 +1711,8 @@ impl Emitter {
         let prefix = self.defines_prefix();
         let io = if self.io_imported { "#include <stdio.h>\n" } else { "" };
         let async_h = if self.async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
-        let program = format!("{}#include \"sirin_runtime.h\"\n{}{}\n{}", prefix, async_h, io, self.output);
+        let net_h = if self.net_imported { "#include \"sirin_net.h\"\n" } else { "" };
+        let program = format!("{}#include \"sirin_runtime.h\"\n{}{}{}\n{}", prefix, async_h, net_h, io, self.output);
         (program, prefix)
     }
 
@@ -1486,7 +1721,8 @@ impl Emitter {
         let prefix = self.defines_prefix();
         let io = if self.io_imported { "#include <stdio.h>\n" } else { "" };
         let async_h = if self.async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
-        let program = format!("{}typedef long long int64_t;\n{}{}\n{}", prefix, async_h, io, self.output);
+        let net_h = if self.net_imported { "#include \"sirin_net.h\"\n" } else { "" };
+        let program = format!("{}typedef long long int64_t;\n{}{}{}\n{}", prefix, async_h, net_h, io, self.output);
         (program, prefix)
     }
 
@@ -1503,6 +1739,7 @@ impl Emitter {
                     let m = path.join(".");
                     if m == "sirin.io"    { self.io_imported    = true; }
                     if m == "sirin.async" { self.async_imported = true; }
+                    if m == "sirin.net"   { self.net_imported   = true; }
                 }
                 Stmt::Class { .. }     => class_stmts.push(s),
                 Stmt::Impl { .. }      => class_stmts.push(s),
@@ -1523,6 +1760,11 @@ impl Emitter {
         if !rest.is_empty() {
             if self.async_imported {
                 self.output.push_str("int main(void) {\n    sirin_loop_init();\n");
+                if self.net_imported {
+                    self.output.push_str("    sirin_net_init();\n");
+                }
+            } else if self.net_imported {
+                self.output.push_str("int main(void) {\n    sirin_net_init();\n");
             } else {
                 self.output.push_str("int main(void) {\n");
             }
@@ -1555,11 +1797,36 @@ impl Emitter {
         v.iter().map(|d| format!("#define {}\n", d)).collect()
     }
 
+    fn named_collection_decls_string(&self) -> String {
+        let map = self.named_collection_decls.borrow();
+        if map.is_empty() { return String::new(); }
+        let mut entries: Vec<&String> = map.values().collect();
+        entries.sort();
+        let mut out = "#include <string.h>\n".to_string();
+        for e in entries { out.push_str(e); }
+        out
+    }
+
+    fn register_named_collection(&self, kind: &str, pascal: &str, snake: &str, c_type: &str) {
+        let key = format!("{kind}_{pascal}");
+        if self.named_collection_decls.borrow().contains_key(&key) { return; }
+        let decl = match kind {
+            "Vec"   => named_vec_impl(pascal, snake, c_type),
+            "Array" => named_array_impl(pascal, snake, c_type),
+            "Set"   => named_set_impl(pascal, snake, c_type),
+            "Map"   => named_map_impl(pascal, snake, c_type),
+            _       => return,
+        };
+        self.named_collection_decls.borrow_mut().insert(key, decl);
+    }
+
     pub fn finish(self) -> String {
         let prefix = self.defines_prefix();
+        let named = self.named_collection_decls_string();
         let io = if self.io_imported { "#include <stdio.h>\n" } else { "" };
         let async_h = if self.async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
-        format!("{}#include \"sirin_runtime.h\"\n{}{}\n{}", prefix, async_h, io, self.output)
+        let net_h = if self.net_imported { "#include \"sirin_net.h\"\n" } else { "" };
+        format!("{}#include \"sirin_runtime.h\"\n{}{}{}{}\n{}", prefix, async_h, net_h, io, named, self.output)
     }
 }
 

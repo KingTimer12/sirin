@@ -1,0 +1,13 @@
+use sirin.io
+use sirin.async
+use sirin.net
+
+listener = TcpListener("0.0.0.0", 3000)
+
+spawn {
+    conn = listener.accept().await
+    msg = conn.read().await
+    println(msg)
+    conn.write(msg)
+    conn.close()
+}

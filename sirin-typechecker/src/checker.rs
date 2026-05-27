@@ -680,6 +680,17 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::MethodCall(obj, method, args) => {
+                // Static net type constructors: TcpStream.connect(...)
+                if let Expr::Var(type_name) = &obj.node {
+                    match *type_name {
+                        "TcpStream" if *method == "connect" => {
+                            for arg in args { self.check_expr(arg)?; }
+                            return Ok(Type::Named("TcpStream".to_string()));
+                        }
+                        _ => {}
+                    }
+                }
+
                 let obj_ty = self.check_expr(obj)?;
 
                 // Cascade suppression: if object has error type, skip arg checks
@@ -797,6 +808,29 @@ impl<'a> Checker<'a> {
                             Ok(Type::Void)
                         }
                     },
+                    // Net type method calls
+                    Type::Named(cls) if matches!(cls.as_str(), "TcpListener" | "TcpStream" | "UdpSocket") => {
+                        for arg in args { self.check_expr(arg)?; }
+                        match cls.as_str() {
+                            "TcpListener" => match *method {
+                                "accept" => Ok(Type::Named("TcpStream".to_string())),
+                                "close"  => Ok(Type::Void),
+                                _ => Ok(Type::Void),
+                            },
+                            "TcpStream" => match *method {
+                                "connect" => Ok(Type::Named("TcpStream".to_string())),
+                                "read"    => Ok(Type::Str),
+                                "write" | "close" => Ok(Type::Void),
+                                _ => Ok(Type::Void),
+                            },
+                            "UdpSocket" => match *method {
+                                "recv_from" => Ok(Type::Named("UdpPacket".to_string())),
+                                "send_to" | "close" => Ok(Type::Void),
+                                _ => Ok(Type::Void),
+                            },
+                            _ => Ok(Type::Void),
+                        }
+                    }
                     // User-defined class method calls
                     Type::Named(cls) => {
                         for arg in args { self.check_expr(arg)?; }
@@ -826,6 +860,13 @@ impl<'a> Checker<'a> {
             Expr::FieldAccess(obj, field) => {
                 let obj_ty = self.check_expr(obj)?;
                 if let Type::Named(cls) = &obj_ty {
+                    if cls == "UdpPacket" {
+                        return match *field {
+                            "data" | "addr" => Ok(Type::Str),
+                            "port"          => Ok(Type::Int),
+                            _               => Ok(Type::Void),
+                        };
+                    }
                     let mut current = Some(cls.clone());
                     while let Some(cls_name) = current {
                         if let Some(class_info) = self.classes.get(cls_name.as_str()) {

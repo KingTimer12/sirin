@@ -20,6 +20,16 @@ pub const ASYNC_C: &str = include_str!(concat!(
     "/../sirin-runtime/sirin_async.c"
 ));
 
+pub const NET_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../sirin-runtime/sirin_net.h"
+));
+
+pub const NET_C: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../sirin-runtime/sirin_net.c"
+));
+
 /// Writes `sirin_runtime.h` and `sirin_runtime.c` into `output_dir`.
 /// Called by `emit-c` to place the runtime alongside the generated C file.
 pub fn write_runtime(output_dir: &Path) -> Result<(), String> {
