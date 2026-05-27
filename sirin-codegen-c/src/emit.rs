@@ -1365,6 +1365,9 @@ impl Emitter {
                         let (_, s) = collection_suffix_for(&inner);
                         match *method {
                             "push" => format!("sirin_vec_{}_push(&{}, {})", s, obj_str, args_str),
+                            "get"  => format!("sirin_vec_{}_get(&{}, {})",  s, obj_str, args_str),
+                            "len"  => format!("(int64_t)({}.len)", obj_str),
+                            "free" => format!("sirin_vec_{}_free(&{})", s, obj_str),
                             _      => format!("sirin_vec_{}_get(&{}, {})",  s, obj_str, args_str),
                         }
                     }
@@ -1372,6 +1375,9 @@ impl Emitter {
                         let (_, s) = collection_suffix_for(&inner);
                         match *method {
                             "push" => format!("sirin_array_{}_push(&{}, {})", s, obj_str, args_str),
+                            "get"  => format!("sirin_array_{}_get(&{}, {})",  s, obj_str, args_str),
+                            "len"  => format!("(int64_t)({}.len)", obj_str),
+                            "free" => format!("sirin_array_{}_free(&{})", s, obj_str),
                             _      => format!("sirin_array_{}_get(&{}, {})",  s, obj_str, args_str),
                         }
                     }
@@ -1634,9 +1640,11 @@ impl Emitter {
                         "recv" => *inner.clone(),
                         _ => Type::Void,
                     },
-                    Type::Vec(inner) | Type::Array(inner) => {
-                        if *method == "push" { Type::Void } else { *inner.clone() }
-                    }
+                    Type::Vec(inner) | Type::Array(inner) => match *method {
+                        "push" | "free" => Type::Void,
+                        "len" => Type::Int,
+                        _ => *inner.clone(),
+                    },
                     Type::Map(_, v) => {
                         if *method == "insert" { Type::Void } else { *v.clone() }
                     }

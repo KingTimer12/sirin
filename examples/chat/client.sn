@@ -17,5 +17,7 @@ async fn write_loop(conn: TcpStream) {
 conn = TcpStream.connect("127.0.0.1", 3000).await
 println("conectado ao servidor")
 
-read_loop(conn).await
+spawn {
+    read_loop(conn)
+}
 write_loop(conn).await
