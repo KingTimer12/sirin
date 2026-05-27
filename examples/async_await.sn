@@ -1,0 +1,22 @@
+use sirin.io
+use sirin.async
+
+ch: Channel[int] = Channel()
+
+async fn producer(c: Channel[int], n: int) {
+    if (n > 0) {
+        c.send(n)
+        return producer(c, n - 1)
+    }
+}
+
+async fn consumer(c: Channel[int], n: int) {
+    if (n > 0) {
+        val = c.recv()
+        println(val)
+        return consumer(c, n - 1)
+    }
+}
+
+producer(ch, 5).await
+consumer(ch, 5).await

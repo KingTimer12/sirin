@@ -142,19 +142,20 @@ pub fn execute(matches: &ArgMatches) {
 
     let mut main_emitter = Emitter::new();
     main_emitter.absorb_exports(&all_exports);
-    let (main_body, defines_prefix, io_imported) =
+    let (main_body, defines_prefix, io_imported, async_imported) =
         main_emitter.emit_body_and_prefix(&main_stmts);
 
     let io_include = if io_imported { "#include <stdio.h>\n" } else { "" };
+    let async_include = if async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
     let c_src = if modules_c.is_empty() {
         format!(
-            "{}#include \"sirin_runtime.h\"\n{}\n{}",
-            defines_prefix, io_include, main_body
+            "{}#include \"sirin_runtime.h\"\n{}{}\n{}",
+            defines_prefix, async_include, io_include, main_body
         )
     } else {
         format!(
-            "{}#include \"sirin_runtime.h\"\n{}\n{}{}",
-            defines_prefix, io_include, modules_c, main_body
+            "{}#include \"sirin_runtime.h\"\n{}{}\n{}{}",
+            defines_prefix, async_include, io_include, modules_c, main_body
         )
     };
 
@@ -177,9 +178,11 @@ pub fn execute(matches: &ArgMatches) {
 #[cfg(not(windows))]
 fn compile_unix(c_src: &str, defines_prefix: &str, out: &str) {
     let tmp = std::env::temp_dir();
-    let h_path = tmp.join("sirin_runtime.h");
-    let c_rt   = tmp.join("sirin_runtime.c");
-    let c_prog = tmp.join("sirin_program.c");
+    let h_path     = tmp.join("sirin_runtime.h");
+    let c_rt       = tmp.join("sirin_runtime.c");
+    let c_async_h  = tmp.join("sirin_async.h");
+    let c_async    = tmp.join("sirin_async.c");
+    let c_prog     = tmp.join("sirin_program.c");
 
     if let Err(e) = std::fs::write(&h_path, runtime::RUNTIME_H) {
         eprintln!("error: cannot write runtime header: {}", e);
@@ -188,6 +191,14 @@ fn compile_unix(c_src: &str, defines_prefix: &str, out: &str) {
     let runtime_with_defines = format!("{}{}", defines_prefix, runtime::RUNTIME_C);
     if let Err(e) = std::fs::write(&c_rt, &runtime_with_defines) {
         eprintln!("error: cannot write runtime source: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = std::fs::write(&c_async_h, runtime::ASYNC_H) {
+        eprintln!("error: cannot write async header: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = std::fs::write(&c_async, runtime::ASYNC_C) {
+        eprintln!("error: cannot write async source: {}", e);
         std::process::exit(1);
     }
     if let Err(e) = std::fs::write(&c_prog, c_src) {
@@ -204,10 +215,12 @@ fn compile_unix(c_src: &str, defines_prefix: &str, out: &str) {
     let status = std::process::Command::new(compiler)
         .args([
             c_rt.to_str().unwrap(),
+            c_async.to_str().unwrap(),
             c_prog.to_str().unwrap(),
             "-I", tmp.to_str().unwrap(),
             "-o", out,
             "-O2",
+            "-Wno-deprecated-declarations",
         ])
         .status();
 

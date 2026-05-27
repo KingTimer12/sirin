@@ -1,0 +1,16 @@
+use sirin.io
+use sirin.async
+
+ch: Channel[int] = Channel()
+
+async fn produce(c: Channel[int], n: int) {
+    c.send(n)
+}
+
+async fn consume(c: Channel[int]) {
+    result = c.recv()
+    println(result)
+}
+
+spawn { produce(ch, 10) }
+spawn { consume(ch) }

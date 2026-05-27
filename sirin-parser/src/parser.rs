@@ -81,6 +81,10 @@ pub fn parser<'a>()
         just(Tokens::MapType)
             .ignore_then(map_bracket)
             .map(|(k, v)| Type::Map(Box::new(k), Box::new(v))),
+        // Channel[T] — matched before Named to avoid "Channel" falling through
+        select! { Tokens::Ident("Channel") => () }
+            .ignore_then(bracket.clone())
+            .map(|t| Type::Channel(Box::new(t))),
         ty_atom,
         ident_name.clone().map(|n: &str| Type::Named(n.to_string())),
     )).boxed();
@@ -90,6 +94,7 @@ pub fn parser<'a>()
         Index(Spanned<Expr<'b>>, Span),
         Field(&'b str, Span),
         Method(&'b str, Vec<Spanned<Expr<'b>>>, Span),
+        Await(Span),
     }
 
     let expr = recursive(|p| {
@@ -215,8 +220,19 @@ pub fn parser<'a>()
             .ignore_then(ident_name.clone())
             .map_with(|name, extra| Postfix::Field(name, sp(extra.span())));
 
+        let postfix_await = just(Tokens::Dot)
+            .ignore_then(just(Tokens::Await))
+            .map_with(|_, extra| Postfix::Await(sp(extra.span())));
+
         let primary = atom
-            .then(postfix_index.or(postfix_method).or(postfix_field).repeated().collect::<Vec<_>>())
+            .then(
+                postfix_index
+                    .or(postfix_await)
+                    .or(postfix_method)
+                    .or(postfix_field)
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
             .map(|(base, ops)| {
                 ops.into_iter().fold(base, |acc, op| match op {
                     Postfix::Index(idx, span) => {
@@ -227,6 +243,9 @@ pub fn parser<'a>()
                     }
                     Postfix::Field(name, span) => {
                         Spanned::new(Expr::FieldAccess(Box::new(acc), name), span)
+                    }
+                    Postfix::Await(span) => {
+                        Spanned::new(Expr::Await(Box::new(acc)), span)
                     }
                 })
             })
@@ -421,8 +440,9 @@ pub fn parser<'a>()
             .then_ignore(just(Tokens::Colon))
             .then(ty.clone());
 
-        let r#fn = just(Tokens::Fn)
-            .ignore_then(spanned_name.clone())
+        let r#fn = just(Tokens::Async).or_not()
+            .then_ignore(just(Tokens::Fn))
+            .then(spanned_name.clone())
             .then(
                 arg.clone()
                     .separated_by(just(Tokens::Comma))
@@ -431,9 +451,10 @@ pub fn parser<'a>()
             )
             .then(just(Tokens::Arrow).ignore_then(ty.clone()).or_not())
             .then(fn_body.clone())
-            .map_with(|(((name, args), return_type), body), extra| {
+            .map_with(|((((async_opt, name), args), return_type), body), extra| {
                 Spanned::new(
                     Stmt::Fn {
+                        async_: async_opt.is_some(),
                         name,
                         args,
                         return_type,
@@ -441,6 +462,17 @@ pub fn parser<'a>()
                     },
                     sp(extra.span()),
                 )
+            });
+
+        let spawn_stmt = just(Tokens::Spawn)
+            .ignore_then(
+                decl.clone()
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+            )
+            .map_with(|body, extra| {
+                Spanned::new(Stmt::Spawn { body }, sp(extra.span()))
             });
 
         // ── Class body items ──────────────────────────────────────────────────
@@ -532,7 +564,7 @@ pub fn parser<'a>()
             .then(fn_body)
             .map_with(|(((name, args), return_type), body), extra| {
                 ClassItem::Method(Spanned::new(
-                    Stmt::Fn { name, args, return_type, body },
+                    Stmt::Fn { async_: false, name, args, return_type, body },
                     sp(extra.span()),
                 ))
             });
@@ -647,12 +679,19 @@ pub fn parser<'a>()
                 Spanned::new(Stmt::Impl { target, methods }, sp(extra.span()))
             });
 
-        // use sirin.io  /  use sirin.net  etc.
+        // use sirin.io  /  use sirin.async  etc.
+        // Segments can be keywords (async, spawn, await) in addition to plain idents.
+        let use_segment = choice((
+            ident_name.clone(),
+            just(Tokens::Async).to("async"),
+            just(Tokens::Spawn).to("spawn"),
+            just(Tokens::Await).to("await"),
+        ));
         let use_stmt = just(Tokens::Use)
-            .ignore_then(ident_name.clone())
+            .ignore_then(use_segment.clone())
             .then(
                 just(Tokens::Dot)
-                    .ignore_then(ident_name.clone())
+                    .ignore_then(use_segment)
                     .repeated()
                     .collect::<Vec<_>>(),
             )
@@ -671,6 +710,7 @@ pub fn parser<'a>()
             .or(r#return)
             .or(r#if)
             .or(r#fn)
+            .or(spawn_stmt)
             .or(class_stmt)
             .or(interface_stmt)
             .or(impl_stmt)

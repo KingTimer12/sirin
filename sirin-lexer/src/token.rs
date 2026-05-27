@@ -80,6 +80,12 @@ pub enum Tokens<'a> {
     // Function tokens
     #[token("fn")]
     Fn,
+    #[token("async")]
+    Async,
+    #[token("spawn")]
+    Spawn,
+    #[token("await")]
+    Await,
     #[token(":=")]
     ColonAssign,
     #[token(":")]

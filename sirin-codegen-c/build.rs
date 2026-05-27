@@ -94,4 +94,6 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/tinycc/lib/libtcc1.c");
     println!("cargo:rerun-if-changed=../sirin-runtime/sirin_runtime.h");
     println!("cargo:rerun-if-changed=../sirin-runtime/sirin_runtime.c");
+    println!("cargo:rerun-if-changed=../sirin-runtime/sirin_async.h");
+    println!("cargo:rerun-if-changed=../sirin-runtime/sirin_async.c");
 }

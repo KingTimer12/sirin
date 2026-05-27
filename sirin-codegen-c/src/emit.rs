@@ -32,6 +32,16 @@ pub struct Emitter {
     prim_methods: HashMap<String, HashSet<String>>,
     /// true when `use sirin.io` was seen
     io_imported: bool,
+    /// true when `use sirin.async` was seen
+    async_imported: bool,
+    /// set of async fn names declared in this scope
+    async_fns: HashSet<String>,
+    /// async fn name → ordered (param_name, param_type)
+    async_fn_params: HashMap<String, Vec<(String, Type)>>,
+    /// counter for unique spawn function/struct names
+    spawn_count: usize,
+    /// top-level C declarations for spawn helper structs and functions
+    spawn_decls: String,
 }
 
 // True if any Stmt::Return in stmts (recursively) has value = Expr::Call(fn_name, _)
@@ -259,6 +269,38 @@ impl Emitter {
             used_types: RefCell::new(HashSet::new()),
             prim_methods: HashMap::new(),
             io_imported: false,
+            async_imported: false,
+            async_fns: HashSet::new(),
+            async_fn_params: HashMap::new(),
+            spawn_count: 0,
+            spawn_decls: String::new(),
+        }
+    }
+
+    /// Create a child emitter for emitting spawn function bodies.
+    /// Inherits type information but starts with fresh output/vars.
+    fn fork_for_spawn(&self) -> Self {
+        Self {
+            output: String::new(),
+            depth: 1,
+            vars: HashMap::new(),
+            fns: self.fns.clone(),
+            current_fn: None,
+            current_fn_params: Vec::new(),
+            current_class: None,
+            class_field_paths: HashMap::new(),
+            method_field_paths: HashMap::new(),
+            classes: self.classes.clone(),
+            class_parents: self.class_parents.clone(),
+            class_methods: self.class_methods.clone(),
+            used_types: RefCell::new(self.used_types.borrow().clone()),
+            prim_methods: self.prim_methods.clone(),
+            io_imported: self.io_imported,
+            async_imported: true,
+            async_fns: self.async_fns.clone(),
+            async_fn_params: self.async_fn_params.clone(),
+            spawn_count: self.spawn_count,
+            spawn_decls: String::new(),
         }
     }
 
@@ -327,10 +369,147 @@ impl Emitter {
     pub fn emit_body_and_prefix<'a>(
         mut self,
         stmts: &'a [Spanned<Stmt<'a>>],
-    ) -> (String, String, bool) {
+    ) -> (String, String, bool, bool) {
         self.emit_top_level(stmts);
         let prefix = self.defines_prefix();
-        (self.output, prefix, self.io_imported)
+        (self.output, prefix, self.io_imported, self.async_imported)
+    }
+
+} // end impl Emitter (helpers below)
+
+fn collect_expr_vars<'a>(expr: &Expr<'a>, out: &mut std::collections::HashSet<String>) {
+    match expr {
+        Expr::Var(n) => { out.insert(n.to_string()); }
+        Expr::Call(_, args) | Expr::New(_, args) => {
+            for a in args { collect_expr_vars(&a.node, out); }
+        }
+        Expr::MethodCall(obj, _, args) => {
+            collect_expr_vars(&obj.node, out);
+            for a in args { collect_expr_vars(&a.node, out); }
+        }
+        Expr::BinOp(_, l, r) => {
+            collect_expr_vars(&l.node, out);
+            collect_expr_vars(&r.node, out);
+        }
+        Expr::Neg(e) | Expr::Not(e) | Expr::Await(e) => collect_expr_vars(&e.node, out),
+        Expr::Index(b, i) => {
+            collect_expr_vars(&b.node, out);
+            collect_expr_vars(&i.node, out);
+        }
+        Expr::FieldAccess(obj, _) => collect_expr_vars(&obj.node, out),
+        Expr::Array(items) => { for i in items { collect_expr_vars(&i.node, out); } }
+        Expr::NewFields(_, fields) => {
+            for (_, v) in fields { collect_expr_vars(&v.node, out); }
+        }
+        _ => {}
+    }
+}
+
+fn collect_stmt_vars<'a>(stmt: &Stmt<'a>, out: &mut std::collections::HashSet<String>) {
+    match stmt {
+        Stmt::Let { rhs, .. } | Stmt::CopyLet { rhs, .. } => collect_expr_vars(&rhs.node, out),
+        Stmt::Expr(e) => collect_expr_vars(&e.node, out),
+        Stmt::Return { value, cond } => {
+            if let Some(v) = value { collect_expr_vars(&v.node, out); }
+            if let Some(c) = cond { collect_expr_vars(&c.node, out); }
+        }
+        Stmt::If { cond, then, else_ } => {
+            collect_expr_vars(&cond.node, out);
+            for s in then { collect_stmt_vars(&s.node, out); }
+            if let Some(els) = else_ {
+                for s in els { collect_stmt_vars(&s.node, out); }
+            }
+        }
+        Stmt::Fn { body, .. } => {
+            for s in body { collect_stmt_vars(&s.node, out); }
+        }
+        _ => {}
+    }
+}
+
+fn collect_body_vars<'a>(stmts: &[sirin_parser::span::Spanned<Stmt<'a>>]) -> std::collections::HashSet<String> {
+    let mut vars = std::collections::HashSet::new();
+    for s in stmts { collect_stmt_vars(&s.node, &mut vars); }
+    vars
+}
+
+/// Emit sirin_yield() before an expression if it contains .await.
+fn expr_has_await(expr: &Expr<'_>) -> bool {
+    match expr {
+        Expr::Await(_) => true,
+        Expr::MethodCall(obj, _, args) => {
+            expr_has_await(&obj.node) || args.iter().any(|a| expr_has_await(&a.node))
+        }
+        Expr::BinOp(_, l, r) => expr_has_await(&l.node) || expr_has_await(&r.node),
+        Expr::Neg(e) | Expr::Not(e) => expr_has_await(&e.node),
+        Expr::Index(b, i) => expr_has_await(&b.node) || expr_has_await(&i.node),
+        Expr::Array(items) => items.iter().any(|i| expr_has_await(&i.node)),
+        Expr::Call(_, args) => args.iter().any(|a| expr_has_await(&a.node)),
+        _ => false,
+    }
+}
+
+/// Returns (void_cast, typed_cast) for a Channel inner type.
+fn channel_cast(ty: &Type) -> (&'static str, &'static str) {
+    match ty {
+        Type::Str             => ("(void*)", "(const char*)"),
+        Type::Float           => ("(void*)(uintptr_t)(uint64_t)", "(double)(uint64_t)(uintptr_t)"),
+        Type::Bool            => ("(void*)(intptr_t)", "(int)(intptr_t)"),
+        Type::U8 | Type::U16 | Type::U32 | Type::U64
+                              => ("(void*)(uintptr_t)", "(uint64_t)(uintptr_t)"),
+        _                     => ("(void*)(intptr_t)", "(int64_t)(intptr_t)"),
+    }
+}
+
+impl Emitter {
+    /// Emit an auto-spawn for `async_fn_name(args).await`.
+    /// Builds a struct + wrapper fn in spawn_decls, then emits sirin_spawn inline.
+    fn emit_async_spawn<'a>(&mut self, fn_name: &str, call_args: &[sirin_parser::span::Spanned<Expr<'a>>]) {
+        let id = self.spawn_count;
+        self.spawn_count += 1;
+
+        let params = self.async_fn_params.get(fn_name).cloned().unwrap_or_default();
+        let struct_name = format!("_AsyncArgs_{}", id);
+        let wrapper_name = format!("_async_fn_{}", id);
+
+        let mut decl = String::new();
+        decl.push_str(&format!("typedef struct {{\n"));
+        for (pname, ty) in &params {
+            decl.push_str(&format!("    {} {};\n", self.type_to_c(ty), pname));
+        }
+        decl.push_str(&format!("}} {};\n\n", struct_name));
+
+        decl.push_str(&format!("static void {}(void* _arg) {{\n", wrapper_name));
+        if !params.is_empty() {
+            decl.push_str(&format!("    {}* _s = ({}*)_arg;\n", struct_name, struct_name));
+        }
+        let call_params = params.iter().map(|(p, _)| format!("_s->{}", p)).collect::<Vec<_>>().join(", ");
+        decl.push_str(&format!("    {}({});\n", fn_name, call_params));
+        if !params.is_empty() {
+            decl.push_str("    free(_arg);\n");
+        }
+        decl.push_str("}\n\n");
+        self.spawn_decls.push_str(&decl);
+
+        if params.is_empty() {
+            self.output.push_str(&format!("{}sirin_spawn({}, NULL);\n", self.indent(), wrapper_name));
+        } else {
+            let arg_vals: Vec<String> = call_args.iter().map(|a| self.emit_expr(&a.node)).collect();
+            self.output.push_str(&format!(
+                "{}{}* _as_{} = ({}*)malloc(sizeof({}));\n",
+                self.indent(), struct_name, id, struct_name, struct_name
+            ));
+            for (i, (pname, _)) in params.iter().enumerate() {
+                self.output.push_str(&format!(
+                    "{}_as_{}->{} = {};\n",
+                    self.indent(), id, pname, arg_vals[i]
+                ));
+            }
+            self.output.push_str(&format!(
+                "{}sirin_spawn({}, _as_{});\n",
+                self.indent(), wrapper_name, id
+            ));
+        }
     }
 
     /// Returns (fn_prefix, c_self_type) for an ImplTarget.
@@ -354,6 +533,10 @@ impl Emitter {
     pub fn emit_stmt<'a>(&mut self, stmt: &'a Stmt<'a>) {
         match stmt {
             Stmt::Let { name, ty: declared, rhs } | Stmt::CopyLet { name, ty: declared, rhs } => {
+                // yield before await expressions in let rhs
+                if expr_has_await(&rhs.node) {
+                    self.output.push_str(&format!("{}sirin_yield();\n", self.indent()));
+                }
                 // Inside a constructor body, assignments to class fields become <path> = val
                 if let Some(path) = self.class_field_paths.get(name.node).cloned() {
                     let val = self.emit_expr(&rhs.node);
@@ -540,8 +723,18 @@ impl Emitter {
                 args,
                 return_type,
                 body,
+                async_,
+                ..
             } => {
                 let fn_name = name.node;
+
+                if *async_ {
+                    self.async_fns.insert(fn_name.to_string());
+                    self.async_fn_params.insert(
+                        fn_name.to_string(),
+                        args.iter().map(|(pname, ty)| (pname.node.to_string(), ty.clone())).collect(),
+                    );
+                }
 
                 if let Err(e) = check_no_non_tail_recursive(body, fn_name) {
                     eprintln!("error: {}", e);
@@ -619,8 +812,93 @@ impl Emitter {
                 self.output.push_str(&format!("{}}}\n", self.indent()));
             }
             Stmt::Expr(expr) => {
+                // async fn call.await → auto-spawn the fn as a coroutine
+                if let Expr::Await(inner) = &expr.node {
+                    if let Expr::Call(name, call_args) = &inner.node {
+                        if self.async_fns.contains(*name) {
+                            self.emit_async_spawn(name, call_args);
+                            return;
+                        }
+                    }
+                }
+                // yield before await expressions at statement level
+                if expr_has_await(&expr.node) {
+                    self.output.push_str(&format!("{}sirin_yield();\n", self.indent()));
+                }
                 let val = self.emit_expr(&expr.node);
                 self.output.push_str(&format!("{}{};\n", self.indent(), val));
+            }
+
+            Stmt::Spawn { body } => {
+                let id = self.spawn_count;
+                self.spawn_count += 1;
+
+                // Collect vars referenced in body that exist in enclosing scope
+                let used = collect_body_vars(body);
+                let mut captured: Vec<(String, Type)> = used
+                    .iter()
+                    .filter_map(|v| self.vars.get(v.as_str()).map(|t| (v.clone(), t.clone())))
+                    .collect();
+                captured.sort_by(|a, b| a.0.cmp(&b.0));
+
+                let struct_name = format!("_SpawnArgs_{}", id);
+                let fn_name = format!("_spawn_fn_{}", id);
+
+                // Build struct + fn source using a child emitter for the body
+                let mut decl = String::new();
+                decl.push_str(&format!("typedef struct {{\n"));
+                for (name, ty) in &captured {
+                    decl.push_str(&format!("    {} {};\n", self.type_to_c(ty), name));
+                }
+                decl.push_str(&format!("}} {};\n\n", struct_name));
+
+                decl.push_str(&format!("static void {}(void* _arg) {{\n", fn_name));
+                if !captured.is_empty() {
+                    decl.push_str(&format!("    {}* _args = ({}*)_arg;\n", struct_name, struct_name));
+                    for (name, ty) in &captured {
+                        decl.push_str(&format!("    {} {} = _args->{};\n", self.type_to_c(ty), name, name));
+                    }
+                }
+
+                // Emit body using a child emitter that has the captured vars in scope
+                let mut sub = self.fork_for_spawn();
+                for (name, ty) in &captured {
+                    sub.vars.insert(name.clone(), ty.clone());
+                }
+                for s in body {
+                    sub.emit_stmt(&s.node);
+                }
+                // Propagate used_types back
+                let sub_used = sub.used_types.into_inner();
+                self.used_types.borrow_mut().extend(sub_used);
+                decl.push_str(&sub.output);
+                decl.push_str("}\n\n");
+
+                self.spawn_decls.push_str(&decl);
+
+                // Inline spawn call in the enclosing scope (main or fn body)
+                if captured.is_empty() {
+                    self.output.push_str(&format!(
+                        "{}sirin_spawn({}, NULL);\n",
+                        self.indent(),
+                        fn_name
+                    ));
+                } else {
+                    self.output.push_str(&format!(
+                        "{}{}* _args_{} = ({}*)malloc(sizeof({}));\n",
+                        self.indent(), struct_name, id, struct_name, struct_name
+                    ));
+                    for (name, _) in &captured {
+                        self.output.push_str(&format!(
+                            "{}_args_{}->{} = {};\n",
+                            self.indent(), id, name, name
+                        ));
+                    }
+                    self.output.push_str(&format!(
+                        "{}sirin_spawn({}, _args_{});\n",
+                        self.indent(), fn_name, id
+                    ));
+                }
             }
 
             Stmt::Class { name, abstract_, extends, is_, fields, methods } => {
@@ -709,7 +987,7 @@ impl Emitter {
                             self.depth -= 1;
                             self.output.push_str("}\n\n");
                         }
-                        Stmt::Fn { name: mname, args, return_type, body } => {
+                        Stmt::Fn { name: mname, args, return_type, body, .. } => {
                             let ret = return_type.as_ref().map_or("void".to_string(), |t| self.type_to_c(t));
                             let extra_params = args.iter()
                                 .map(|(n, t)| format!("{} {}", self.type_to_c(t), n.node))
@@ -757,7 +1035,7 @@ impl Emitter {
                             .unwrap_or_default();
 
                         for m in methods {
-                            if let Stmt::Fn { name: mname, args, return_type, body } = &m.node {
+                            if let Stmt::Fn { name: mname, args, return_type, body, .. } = &m.node {
                                 let ret = return_type.as_ref().map_or("void".to_string(), |t| self.type_to_c(t));
                                 let extra_params = args.iter()
                                     .map(|(n, t)| format!("{} {}", self.type_to_c(t), n.node))
@@ -782,7 +1060,7 @@ impl Emitter {
                     _ => {
                         let (prefix, c_self_ty) = Self::impl_target_info(target);
                         for m in methods {
-                            if let Stmt::Fn { name: mname, args, return_type, body } = &m.node {
+                            if let Stmt::Fn { name: mname, args, return_type, body, .. } = &m.node {
                                 let ret = return_type.as_ref().map_or("void".to_string(), |t| self.type_to_c(t));
                                 let extra_params = args.iter()
                                     .map(|(n, t)| format!("{} {}", self.type_to_c(t), n.node))
@@ -840,6 +1118,7 @@ impl Emitter {
 
     fn emit_expr<'a>(&self, expr: &'a Expr<'a>) -> String {
         match expr {
+            Expr::Await(inner) => self.emit_expr(&inner.node),
             Expr::Int(x) => format!("{}", x),
             Expr::Float(x) => format!("{}", x),
             Expr::Boolean(x) => (if *x { "1" } else { "0" }).to_string(),
@@ -931,6 +1210,19 @@ impl Emitter {
                     .collect::<Vec<_>>()
                     .join(", ");
                 match obj_ty {
+                    Type::Channel(inner) => match *method {
+                        "send" => {
+                            let (to_void, _) = channel_cast(&inner);
+                            let val = args_str;
+                            format!("sirin_channel_send({}, {}{})", obj_str, to_void, val)
+                        }
+                        "recv" => {
+                            let (_, from_void) = channel_cast(&inner);
+                            format!("{}sirin_channel_recv({})", from_void, obj_str)
+                        }
+                        "free" => format!("sirin_channel_free({})", obj_str),
+                        _ => format!("{}.{}({})", obj_str, method, args_str),
+                    },
                     Type::Vec(inner) => {
                         let (_, s) = collection_suffix(&inner);
                         match *method {
@@ -1018,10 +1310,14 @@ impl Emitter {
                 }
             }
             Expr::New(name, args) => {
+                if *name == "Channel" { return "sirin_channel_new()".to_string(); }
                 let args_str = args.iter().map(|a| self.emit_expr(&a.node)).collect::<Vec<_>>().join(", ");
                 format!("{}_new({})", name, args_str)
             }
-            Expr::NewDefault(name) => format!("{}_default()", name),
+            Expr::NewDefault(name) => {
+                if *name == "Channel" { return "sirin_channel_new()".to_string(); }
+                format!("{}_default()", name)
+            }
             Expr::NewFields(name, fields) => {
                 let inits = fields.iter()
                     .map(|(fname, fval)| format!(".{} = {}", fname, self.emit_expr(&fval.node)))
@@ -1072,6 +1368,7 @@ impl Emitter {
             Type::Set(inner)   => format!("SirinSet{}", collection_suffix(inner).0),
             Type::Map(_, val)  => format!("SirinMapStr{}", collection_suffix(val).0),
             Type::Named(n) => n.clone(),
+            Type::Channel(_) => "SirinChannel*".to_string(),
         };
         if let Some(define) = ty_to_define(ty) {
             self.used_types.borrow_mut().insert(define.to_string());
@@ -1081,6 +1378,7 @@ impl Emitter {
 
     fn get_expr<'a>(&self, expr: &'a Expr<'a>) -> Type {
         match expr {
+            Expr::Await(inner) => self.get_expr(&inner.node),
             Expr::Int(_) => Type::Int,
             Expr::Float(_) => Type::Float,
             Expr::Str(_) => Type::Str,
@@ -1124,6 +1422,11 @@ impl Emitter {
             Expr::MethodCall(obj, method, _) => {
                 let obj_ty = self.get_expr(&obj.node);
                 match &obj_ty {
+                    Type::Channel(inner) => match *method {
+                        "send" | "free" => Type::Void,
+                        "recv" => *inner.clone(),
+                        _ => Type::Void,
+                    },
                     Type::Vec(inner) | Type::Array(inner) => {
                         if *method == "push" { Type::Void } else { *inner.clone() }
                     }
@@ -1173,18 +1476,17 @@ impl Emitter {
         self.emit_top_level(stmts);
         let prefix = self.defines_prefix();
         let io = if self.io_imported { "#include <stdio.h>\n" } else { "" };
-        let program = format!("{}#include \"sirin_runtime.h\"\n{}\n{}", prefix, io, self.output);
+        let async_h = if self.async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
+        let program = format!("{}#include \"sirin_runtime.h\"\n{}{}\n{}", prefix, async_h, io, self.output);
         (program, prefix)
     }
 
-    /// Like `emit_program` but uses inline typedefs instead of `#include <stdint.h>`.
-    /// Returns `(program_src, defines_prefix)` — caller must prepend `defines_prefix`
-    /// to the runtime source before compiling so `#ifdef` guards activate.
     pub fn emit_program_tcc<'a>(mut self, stmts: &'a [Spanned<Stmt<'a>>]) -> (String, String) {
         self.emit_top_level(stmts);
         let prefix = self.defines_prefix();
         let io = if self.io_imported { "#include <stdio.h>\n" } else { "" };
-        let program = format!("{}typedef long long int64_t;\n{}\n{}", prefix, io, self.output);
+        let async_h = if self.async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
+        let program = format!("{}typedef long long int64_t;\n{}{}\n{}", prefix, async_h, io, self.output);
         (program, prefix)
     }
 
@@ -1198,10 +1500,9 @@ impl Emitter {
         for s in stmts {
             match &s.node {
                 Stmt::Use { path } => {
-                    if path.join(".") == "sirin.io" {
-                        self.io_imported = true;
-                    }
-                    // local module stmts are resolved by the CLI before emission
+                    let m = path.join(".");
+                    if m == "sirin.io"    { self.io_imported    = true; }
+                    if m == "sirin.async" { self.async_imported = true; }
                 }
                 Stmt::Class { .. }     => class_stmts.push(s),
                 Stmt::Impl { .. }      => class_stmts.push(s),
@@ -1216,12 +1517,31 @@ impl Emitter {
         for s in &class_stmts { self.emit_stmt(&s.node); }
         for s in &fn_stmts    { self.emit_stmt(&s.node); }
 
+        // Remember where to insert spawn declarations (after fns, before main)
+        let spawn_insert_pos = self.output.len();
+
         if !rest.is_empty() {
-            self.output.push_str("int main(void) {\n");
+            if self.async_imported {
+                self.output.push_str("int main(void) {\n    sirin_loop_init();\n");
+            } else {
+                self.output.push_str("int main(void) {\n");
+            }
             self.depth += 1;
             for s in &rest { self.emit_stmt(&s.node); }
             self.depth -= 1;
+            if self.async_imported {
+                self.output.push_str("    sirin_loop_run();\n");
+            }
             self.output.push_str("    return 0;\n}\n");
+        }
+
+        // Splice spawn declarations before main
+        if !self.spawn_decls.is_empty() {
+            let after = self.output[spawn_insert_pos..].to_string();
+            self.output.truncate(spawn_insert_pos);
+            self.output.push_str(&self.spawn_decls);
+            self.output.push_str(&after);
+            self.spawn_decls.clear();
         }
     }
 
@@ -1238,7 +1558,8 @@ impl Emitter {
     pub fn finish(self) -> String {
         let prefix = self.defines_prefix();
         let io = if self.io_imported { "#include <stdio.h>\n" } else { "" };
-        format!("{}#include \"sirin_runtime.h\"\n{}\n{}", prefix, io, self.output)
+        let async_h = if self.async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
+        format!("{}#include \"sirin_runtime.h\"\n{}{}\n{}", prefix, async_h, io, self.output)
     }
 }
 

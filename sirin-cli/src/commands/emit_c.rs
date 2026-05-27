@@ -123,19 +123,20 @@ pub fn execute(matches: &ArgMatches) {
     // ── Emit combined C ───────────────────────────────────────────────────────
     let mut main_emitter = Emitter::new();
     main_emitter.absorb_exports(&all_exports);
-    let (main_body, defines_prefix, io_imported) =
+    let (main_body, defines_prefix, io_imported, async_imported) =
         main_emitter.emit_body_and_prefix(&main_stmts);
 
     let io_include = if io_imported { "#include <stdio.h>\n" } else { "" };
+    let async_include = if async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
     let c_src = if modules_c.is_empty() {
         format!(
-            "{}#include \"sirin_runtime.h\"\n{}\n{}",
-            defines_prefix, io_include, main_body
+            "{}#include \"sirin_runtime.h\"\n{}{}\n{}",
+            defines_prefix, async_include, io_include, main_body
         )
     } else {
         format!(
-            "{}#include \"sirin_runtime.h\"\n{}\n{}{}",
-            defines_prefix, io_include, modules_c, main_body
+            "{}#include \"sirin_runtime.h\"\n{}{}\n{}{}",
+            defines_prefix, async_include, io_include, modules_c, main_body
         )
     };
 

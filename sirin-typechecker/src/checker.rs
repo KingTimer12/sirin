@@ -49,6 +49,8 @@ pub struct Checker<'a> {
     fns: HashMap<String, sirin_parser::types::Type>,
     /// names of private (_-prefixed) functions from imported modules
     module_private_fns: HashSet<String>,
+    /// true when `use sirin.async` was seen
+    pub async_imported: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -62,6 +64,7 @@ impl<'a> Checker<'a> {
             imported_modules: HashSet::new(),
             fns: HashMap::new(),
             module_private_fns: HashSet::new(),
+            async_imported: false,
         }
     }
 
@@ -215,7 +218,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::Fn { name: fn_decl_name, args, return_type, body } => {
+            Stmt::Fn { name: fn_decl_name, args, return_type, body, .. } => {
                 self.fns.insert(
                     fn_decl_name.node.to_string(),
                     return_type.clone().unwrap_or(Type::Void),
@@ -226,7 +229,7 @@ impl<'a> Checker<'a> {
                     self.env.define(arg_name.node, arg_ty.clone());
                 }
 
-                self.env.set_return(return_type.clone());
+                self.env.set_return(Some(return_type.clone().unwrap_or(Type::Void)));
 
                 for stmt in body {
                     self.check_stmt(stmt)?;
@@ -321,7 +324,7 @@ impl<'a> Checker<'a> {
 
                 for method_stmt in methods {
                     match &method_stmt.node {
-                        Stmt::Fn { name: mname, args, return_type, body } => {
+                        Stmt::Fn { name: mname, args, return_type, body, .. } => {
                             self.env.push_scope();
                             self.env.define("self", Type::Named(class_name.to_string()));
                             for f in fields {
@@ -333,7 +336,7 @@ impl<'a> Checker<'a> {
                             for (aname, aty) in args {
                                 self.env.define(aname.node, aty.clone());
                             }
-                            self.env.set_return(return_type.clone());
+                            self.env.set_return(Some(return_type.clone().unwrap_or(Type::Void)));
                             for s in body {
                                 self.check_stmt(s)?;
                             }
@@ -437,7 +440,7 @@ impl<'a> Checker<'a> {
                 };
 
                 for method_stmt in methods {
-                    if let Stmt::Fn { name: mname, args, return_type, body } = &method_stmt.node {
+                    if let Stmt::Fn { name: mname, args, return_type, body, .. } = &method_stmt.node {
                         self.env.push_scope();
                         self.env.define("self", self_ty.clone());
                         for (fname, fty) in &class_fields {
@@ -452,7 +455,7 @@ impl<'a> Checker<'a> {
                         for (aname, aty) in args {
                             self.env.define(aname.node, aty.clone());
                         }
-                        self.env.set_return(return_type.clone());
+                        self.env.set_return(Some(return_type.clone().unwrap_or(Type::Void)));
                         for s in body {
                             self.check_stmt(s)?;
                         }
@@ -482,8 +485,20 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
 
+            Stmt::Spawn { body } => {
+                self.env.push_scope();
+                for s in body {
+                    self.check_stmt(s)?;
+                }
+                self.env.pop_scope();
+                Ok(())
+            }
+
             Stmt::Use { path } => {
                 let module = path.join(".");
+                if module == "sirin.async" {
+                    self.async_imported = true;
+                }
                 self.imported_modules.insert(module);
                 Ok(())
             }
@@ -583,7 +598,10 @@ impl<'a> Checker<'a> {
                     CheckerError::NameError(name)
                 })
             }
+            Expr::Await(inner) => self.check_expr(inner),
+
             Expr::Call(name, args) => match *name {
+                "Channel" => Ok(Type::Void), // declared type wins in typed-let
                 "Vec" | "Array" => {
                     // Optional capacity arg must be integer
                     for arg in args {
@@ -671,6 +689,19 @@ impl<'a> Checker<'a> {
                 }
 
                 match &obj_ty {
+                    Type::Channel(inner) => {
+                        match *method {
+                            "send" => {
+                                if let Some(val) = args.first() {
+                                    self.check_expr(val)?;
+                                }
+                                Ok(Type::Void)
+                            }
+                            "recv" => Ok(*inner.clone()),
+                            "free" => Ok(Type::Void),
+                            _ => Ok(Type::Void),
+                        }
+                    }
                     Type::Vec(inner) | Type::Array(inner) => match *method {
                         "push" => {
                             if let Some(val) = args.first() {
@@ -811,9 +842,13 @@ impl<'a> Checker<'a> {
             }
             Expr::New(name, args) => {
                 for arg in args { self.check_expr(arg)?; }
+                if *name == "Channel" { return Ok(Type::Void); }
                 Ok(Type::Named(name.to_string()))
             }
-            Expr::NewDefault(name) => Ok(Type::Named(name.to_string())),
+            Expr::NewDefault(name) => {
+                if *name == "Channel" { return Ok(Type::Void); }
+                Ok(Type::Named(name.to_string()))
+            }
             Expr::NewFields(name, fields) => {
                 for (_, val) in fields { self.check_expr(val)?; }
                 Ok(Type::Named(name.to_string()))

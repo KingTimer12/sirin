@@ -23,6 +23,8 @@ pub enum Type {
     Set(Box<Type>),
     // user-defined class/struct types
     Named(String),
+    // async channel
+    Channel(Box<Type>),
 }
 
 impl Type {

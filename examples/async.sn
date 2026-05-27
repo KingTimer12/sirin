@@ -1,0 +1,19 @@
+use sirin.io
+use sirin.async
+
+ch: Channel[int] = Channel()
+
+spawn {
+    ch.send(1)
+    ch.send(2)
+    ch.send(3)
+}
+
+spawn {
+    a = ch.recv()
+    b = ch.recv()
+    c = ch.recv()
+    println(a)
+    println(b)
+    println(c)
+}

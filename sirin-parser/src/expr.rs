@@ -7,6 +7,7 @@ pub enum Expr<'a> {
     Str(&'a str),
     Boolean(bool),
     Var(&'a str),
+    Await(Box<Spanned<Expr<'a>>>),
     Neg(Box<Spanned<Expr<'a>>>),
     Not(Box<Spanned<Expr<'a>>>),
     BinOp(BinOp, Box<Spanned<Expr<'a>>>, Box<Spanned<Expr<'a>>>),
