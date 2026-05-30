@@ -1,0 +1,29 @@
+use sirin.io
+
+s = "Hello, World"
+
+println(s.len())
+println(s.to_upper())
+println(s.to_lower())
+println(s.slice(0, 5))
+println(s.index_of("World"))
+println(s.contains("World"))
+println(s.starts_with("Hello"))
+println(s.ends_with("World"))
+println(s.replace("World", "Sirin"))
+
+linha = "  GET /users/1 HTTP/1.1  "
+println(linha.trim())
+
+partes = linha.trim().split(" ")
+println(partes.get(0))
+println(partes.get(1))
+println(partes.get(2))
+
+n = "42".to_int()
+println(n + 8)
+
+corpo = "{\"nome\": \"Julius\", \"idade\": 24}"
+usuario: { nome: str, idade: int } = corpo.to_object()
+println(usuario.nome)
+println(usuario.idade)

@@ -23,6 +23,8 @@ pub enum Type {
     Set(Box<Type>),
     // user-defined class/struct types
     Named(String),
+    // anonymous struct literal { field: T, ... } — fields kept sorted by name (structural)
+    Struct(Vec<(String, Type)>),
     // async channel
     Channel(Box<Type>),
 }

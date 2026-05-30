@@ -3,6 +3,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
+
+#ifndef _WIN32
+    #include <unistd.h>
+    #include <fcntl.h>
+    #include <errno.h>
+#endif
+
+/* Provided by sirin_async.c (always linked). Declared here to avoid header
+   coupling — readln cooperates with the event loop when run in a coroutine. */
+extern int  sirin_in_coroutine(void);
+extern void sirin_yield(void);
 
 /* ── internal ─────────────────────────────────────────────────────────────── */
 
@@ -24,6 +36,15 @@ static void* sirin_realloc(void* p, size_t n) {
     return q;
 }
 
+/* Heap-duplicate n bytes of s as a NUL-terminated string (caller owns; leaked
+   like other Sirin strings — the language has no GC yet). */
+static char* sirin__dup(const char* s, size_t n) {
+    char* buf = (char*)sirin_alloc(n + 1);
+    memcpy(buf, s, n);
+    buf[n] = '\0';
+    return buf;
+}
+
 /* ── SirinStr ─────────────────────────────────────────────────────────────── */
 
 SirinStr sirin_str_new(const char* literal) {
@@ -43,6 +64,142 @@ void sirin_str_free(SirinStr s) { free(s.ptr); }
 
 int sirin_str_eq(SirinStr a, SirinStr b) {
     return a.len == b.len && memcmp(a.ptr, b.ptr, a.len) == 0;
+}
+
+/* ── str ops on plain const char* ─────────────────────────────────────────── */
+
+const char* sirin_str_clone(const char* s) { return sirin__dup(s, strlen(s)); }
+
+void sirin_cstr_free(const char* s) { free((void*)s); }
+
+int64_t sirin_str_len(const char* s) { return (int64_t)strlen(s); }
+
+const char* sirin_str_char_at(const char* s, int64_t i) {
+    int64_t n = (int64_t)strlen(s);
+    if (i < 0 || i >= n) return "";
+    return sirin__dup(s + i, 1);
+}
+
+const char* sirin_str_slice(const char* s, int64_t start, int64_t end) {
+    int64_t n = (int64_t)strlen(s);
+    if (start < 0) start += n;          /* negative = from end */
+    if (end   < 0) end   += n;
+    if (start < 0) start = 0;
+    if (end   > n) end   = n;
+    if (start >= end) return "";
+    return sirin__dup(s + start, (size_t)(end - start));
+}
+
+int64_t sirin_str_index_of(const char* s, const char* sub) {
+    const char* p = strstr(s, sub);
+    return p ? (int64_t)(p - s) : -1;
+}
+
+int sirin_str_contains(const char* s, const char* sub) {
+    return strstr(s, sub) != NULL;
+}
+
+int sirin_str_starts_with(const char* s, const char* pre) {
+    return strncmp(s, pre, strlen(pre)) == 0;
+}
+
+int sirin_str_ends_with(const char* s, const char* suf) {
+    size_t ls = strlen(s), lf = strlen(suf);
+    if (lf > ls) return 0;
+    return memcmp(s + ls - lf, suf, lf) == 0;
+}
+
+const char* sirin_str_trim(const char* s) {
+    while (*s && isspace((unsigned char)*s)) s++;
+    const char* end = s + strlen(s);
+    while (end > s && isspace((unsigned char)end[-1])) end--;
+    return sirin__dup(s, (size_t)(end - s));
+}
+
+int64_t sirin_str_to_int(const char* s)   { return (int64_t)strtoll(s, NULL, 10); }
+double  sirin_str_to_float(const char* s) { return strtod(s, NULL); }
+
+const char* sirin_str_to_upper(const char* s) {
+    size_t n = strlen(s);
+    char* buf = (char*)sirin_alloc(n + 1);
+    for (size_t i = 0; i < n; i++) buf[i] = (char)toupper((unsigned char)s[i]);
+    buf[n] = '\0';
+    return buf;
+}
+
+const char* sirin_str_to_lower(const char* s) {
+    size_t n = strlen(s);
+    char* buf = (char*)sirin_alloc(n + 1);
+    for (size_t i = 0; i < n; i++) buf[i] = (char)tolower((unsigned char)s[i]);
+    buf[n] = '\0';
+    return buf;
+}
+
+const char* sirin_str_replace(const char* s, const char* from, const char* to) {
+    size_t lf = strlen(from);
+    if (lf == 0) return sirin__dup(s, strlen(s));
+    size_t lt = strlen(to), ls = strlen(s), count = 0;
+    for (const char* p = s; (p = strstr(p, from)); p += lf) count++;
+    char* buf = (char*)sirin_alloc(ls + count * (lt > lf ? lt - lf : 0) + 1);
+    char* out = buf;
+    const char* p = s;
+    for (;;) {
+        const char* hit = strstr(p, from);
+        if (!hit) { strcpy(out, p); break; }
+        size_t chunk = (size_t)(hit - p);
+        memcpy(out, p, chunk); out += chunk;
+        memcpy(out, to, lt);   out += lt;
+        p = hit + lf;
+    }
+    return buf;
+}
+
+/* ── minimal JSON field extraction ────────────────────────────────────────── */
+
+/* Locate the value position for "key" in a flat JSON object. Returns a pointer
+   to the first non-space char after the colon, or NULL if the key is absent. */
+static const char* sirin__json_find(const char* json, const char* key) {
+    size_t lk = strlen(key);
+    const char* p = json;
+    while ((p = strchr(p, '"'))) {
+        const char* kstart = p + 1;
+        const char* kend = strchr(kstart, '"');
+        if (!kend) return NULL;
+        size_t klen = (size_t)(kend - kstart);
+        const char* after = kend + 1;
+        while (*after && isspace((unsigned char)*after)) after++;
+        if (*after == ':' && klen == lk && memcmp(kstart, key, lk) == 0) {
+            after++;
+            while (*after && isspace((unsigned char)*after)) after++;
+            return after;
+        }
+        p = kend + 1;
+    }
+    return NULL;
+}
+
+const char* sirin_json_get_str(const char* json, const char* key) {
+    const char* v = sirin__json_find(json, key);
+    if (!v || *v != '"') return "";
+    const char* start = v + 1;
+    const char* p = start;
+    while (*p && *p != '"') { if (*p == '\\' && p[1]) p++; p++; }
+    return sirin__dup(start, (size_t)(p - start));
+}
+
+int64_t sirin_json_get_int(const char* json, const char* key) {
+    const char* v = sirin__json_find(json, key);
+    return v ? (int64_t)strtoll(v, NULL, 10) : 0;
+}
+
+double sirin_json_get_float(const char* json, const char* key) {
+    const char* v = sirin__json_find(json, key);
+    return v ? strtod(v, NULL) : 0.0;
+}
+
+int sirin_json_get_bool(const char* json, const char* key) {
+    const char* v = sirin__json_find(json, key);
+    return v && strncmp(v, "true", 4) == 0;
 }
 
 /* ── Vec impl macro ───────────────────────────────────────────────────────── */
@@ -108,6 +265,19 @@ SIRIN_VEC_IMPL(Bool,  bool,  int)
 #endif
 #ifdef SIRIN_USE_VEC_STR
 SIRIN_VEC_IMPL(Str,   str,   SirinCStr)
+SirinVecStr sirin_str_split(const char* s, const char* sep) {
+    SirinVecStr v = sirin_vec_str_new(4);
+    size_t lsep = strlen(sep);
+    if (lsep == 0) { sirin_vec_str_push(&v, sirin__dup(s, strlen(s))); return v; }
+    const char* p = s;
+    for (;;) {
+        const char* hit = strstr(p, sep);
+        if (!hit) { sirin_vec_str_push(&v, sirin__dup(p, strlen(p))); break; }
+        sirin_vec_str_push(&v, sirin__dup(p, (size_t)(hit - p)));
+        p = hit + lsep;
+    }
+    return v;
+}
 #endif
 
 /* ── Array impl macro ─────────────────────────────────────────────────────── */
@@ -281,6 +451,35 @@ SIRIN_MAP_STR_IMPL(Float, float, double)
 
 const char* sirin_readln(void) {
     static char buf[1024];
+#ifndef _WIN32
+    /* In a coroutine: read stdin non-blocking and yield so other coroutines
+       (e.g. a socket read loop) keep running while waiting for user input. */
+    if (sirin_in_coroutine()) {
+        static int initialized = 0;
+        if (!initialized) {
+            int fl = fcntl(0, F_GETFL, 0);
+            fcntl(0, F_SETFL, fl | O_NONBLOCK);
+            initialized = 1;
+        }
+        size_t len = 0;
+        for (;;) {
+            char c;
+            ssize_t r = read(0, &c, 1);
+            if (r > 0) {
+                if (c == '\n') break;
+                if (len < sizeof(buf) - 1) buf[len++] = c;
+            } else if (r == 0) {
+                if (len == 0) return "";  /* EOF */
+                break;
+            } else {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) { sirin_yield(); continue; }
+                break;
+            }
+        }
+        buf[len] = '\0';
+        return buf;
+    }
+#endif
     if (!fgets(buf, sizeof(buf), stdin)) return "";
     size_t len = strlen(buf);
     if (len > 0 && buf[len-1] == '\n') buf[--len] = '\0';

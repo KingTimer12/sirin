@@ -170,7 +170,7 @@ pub enum Tokens<'a> {
     Integer(i64),
     #[regex(r"[+-]?([0-9]+[.][0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?", |lex| lex.slice().parse())]
     Float(f64),
-    #[regex(r#""[^"]*""#, |lex| {
+    #[regex(r#""([^"\\]|\\.)*""#, |lex| {
         let s = lex.slice();
         &s[1..s.len()-1]
     })]

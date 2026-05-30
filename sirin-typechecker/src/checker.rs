@@ -49,6 +49,11 @@ pub struct Checker<'a> {
     fns: HashMap<String, sirin_parser::types::Type>,
     /// names of private (_-prefixed) functions from imported modules
     module_private_fns: HashSet<String>,
+    /// names of functions declared `async fn` — only these may be `.await`ed
+    async_fns: HashSet<String>,
+    /// true while checking the body of an async fn or a spawn block —
+    /// `.await` is only valid inside such a coroutine context
+    in_async_ctx: bool,
     /// true when `use sirin.async` was seen
     pub async_imported: bool,
 }
@@ -64,6 +69,8 @@ impl<'a> Checker<'a> {
             imported_modules: HashSet::new(),
             fns: HashMap::new(),
             module_private_fns: HashSet::new(),
+            async_fns: HashSet::new(),
+            in_async_ctx: false,
             async_imported: false,
         }
     }
@@ -73,8 +80,9 @@ impl<'a> Checker<'a> {
     pub fn import_module(&mut self, stmts: &[Spanned<Stmt<'_>>]) {
         for s in stmts {
             match &s.node {
-                Stmt::Fn { name, return_type, .. } => {
+                Stmt::Fn { name, return_type, async_, .. } => {
                     let fn_name = name.node.to_string();
+                    if *async_ { self.async_fns.insert(fn_name.clone()); }
                     if fn_name.starts_with('_') {
                         self.module_private_fns.insert(fn_name);
                     } else {
@@ -138,6 +146,20 @@ impl<'a> Checker<'a> {
             Type::I16             => Some("i16"),
             Type::I32             => Some("i32"),
             _                     => None,
+        }
+    }
+
+    /// Ownership move: when a non-copy variable is stored into an aggregate
+    /// (struct/array/collection/object) or returned, the original binding loses
+    /// ownership. Copy types (ints/bool/float) are exempt. Call AFTER type-checking
+    /// the expression so use-after-move on the value itself is still caught.
+    fn consume_var(&mut self, e: &Spanned<Expr<'a>>, to: &str) {
+        if let Expr::Var(n) = &e.node {
+            if let Some(ty) = self.env.get(n) {
+                if !ty.is_copy() {
+                    self.env.mark_moved(n, to.to_string());
+                }
+            }
         }
     }
 
@@ -218,7 +240,8 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::Fn { name: fn_decl_name, args, return_type, body, .. } => {
+            Stmt::Fn { name: fn_decl_name, args, return_type, body, async_, .. } => {
+                if *async_ { self.async_fns.insert(fn_decl_name.node.to_string()); }
                 self.fns.insert(
                     fn_decl_name.node.to_string(),
                     return_type.clone().unwrap_or(Type::Void),
@@ -231,9 +254,14 @@ impl<'a> Checker<'a> {
 
                 self.env.set_return(Some(return_type.clone().unwrap_or(Type::Void)));
 
+                let prev_ctx = self.in_async_ctx;
+                self.in_async_ctx = *async_;
+                let mut body_res = Ok(());
                 for stmt in body {
-                    self.check_stmt(stmt)?;
+                    if let Err(e) = self.check_stmt(stmt) { body_res = Err(e); break; }
                 }
+                self.in_async_ctx = prev_ctx;
+                body_res?;
 
                 self.env.pop_scope();
                 self.env.set_return(None);
@@ -270,7 +298,11 @@ impl<'a> Checker<'a> {
                 }
 
                 let return_ty = match value {
-                    Some(expr) => self.check_expr(expr)?,
+                    Some(expr) => {
+                        let t = self.check_expr(expr)?;
+                        self.consume_var(expr, "return value");
+                        t
+                    }
                     None => Type::Void,
                 };
 
@@ -487,10 +519,15 @@ impl<'a> Checker<'a> {
 
             Stmt::Spawn { body } => {
                 self.env.push_scope();
+                let prev_ctx = self.in_async_ctx;
+                self.in_async_ctx = true;  // spawn body runs as a coroutine
+                let mut body_res = Ok(());
                 for s in body {
-                    self.check_stmt(s)?;
+                    if let Err(e) = self.check_stmt(s) { body_res = Err(e); break; }
                 }
+                self.in_async_ctx = prev_ctx;
                 self.env.pop_scope();
+                body_res?;
                 Ok(())
             }
 
@@ -598,7 +635,41 @@ impl<'a> Checker<'a> {
                     CheckerError::NameError(name)
                 })
             }
-            Expr::Await(inner) => self.check_expr(inner),
+            Expr::Await(inner) => {
+                // `.await` is only valid inside an async fn or a spawn block (a
+                // coroutine). At top level use `spawn { ... }` to launch async work.
+                if !self.in_async_ctx {
+                    report_error(
+                        &inner.span.file, self.src, &inner.span,
+                        "await outside async context",
+                        "`.await` is only allowed inside an `async fn` or a `spawn { }` block; at top level launch async work with `spawn { ... }`",
+                    );
+                    return Err(CheckerError::GenericError(
+                        "`.await` used outside an async context".to_string(),
+                    ));
+                }
+                // `.await` is only valid on async function calls. Method-call I/O
+                // (l.accept(), conn.read(), TcpStream.connect()) is exempt; only a
+                // plain call to a known, non-async user function is rejected.
+                if let Expr::Call(fname, _) = &inner.node {
+                    let is_known = self.fns.contains_key(*fname)
+                        || self.module_private_fns.contains(*fname);
+                    if is_known && !self.async_fns.contains(*fname) {
+                        report_error(
+                            &inner.span.file, self.src, &inner.span,
+                            "await on non-async function",
+                            &format!(
+                                "`{}` is not declared `async fn`; `.await` requires an async function (call it directly or mark it `async fn`)",
+                                fname
+                            ),
+                        );
+                        return Err(CheckerError::GenericError(format!(
+                            "cannot `.await` non-async function `{}`", fname
+                        )));
+                    }
+                }
+                self.check_expr(inner)
+            }
 
             Expr::Call(name, args) => match *name {
                 "Channel" => Ok(Type::Void), // declared type wins in typed-let
@@ -641,6 +712,9 @@ impl<'a> Checker<'a> {
                     Ok(Type::Str)
                 }
                 _ => {
+                    // Args are borrowed (read), not moved — aggregation model. Checking
+                    // them still catches use-after-move reads.
+                    for arg in args { self.check_expr(arg)?; }
                     if self.module_private_fns.contains(*name) {
                         return Err(CheckerError::PrivateAccess {
                             name: name.to_string(),
@@ -658,6 +732,7 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Array(Box::new(Type::Void)));
                 }
                 let inner = self.check_expr(&items[0])?;
+                self.consume_var(&items[0], "array literal");
                 for item in &items[1..] {
                     let ty = self.check_expr(item)?;
                     if ty != inner && !(ty.is_integer() && inner.is_integer()) {
@@ -668,6 +743,7 @@ impl<'a> Checker<'a> {
                         );
                         return Err(CheckerError::TypeError(inner, ty));
                     }
+                    self.consume_var(item, "array literal");
                 }
                 Ok(Type::Array(Box::new(inner)))
             }
@@ -705,6 +781,7 @@ impl<'a> Checker<'a> {
                             "send" => {
                                 if let Some(val) = args.first() {
                                     self.check_expr(val)?;
+                                    self.consume_var(val, "channel send");
                                 }
                                 Ok(Type::Void)
                             }
@@ -727,9 +804,12 @@ impl<'a> Checker<'a> {
                                     );
                                     return Err(CheckerError::TypeError(*inner.clone(), got));
                                 }
+                                self.consume_var(val, "collection element");
                             }
                             Ok(Type::Void)
                         }
+                        "len" => Ok(Type::Int),
+                        "free" => Ok(Type::Void),
                         _ => {
                             for arg in args { self.check_expr(arg)?; }
                             Ok(*inner.clone())
@@ -762,6 +842,7 @@ impl<'a> Checker<'a> {
                                     );
                                     return Err(CheckerError::TypeError(*val_ty.clone(), got));
                                 }
+                                self.consume_var(v, "map value");
                             }
                             Ok(Type::Void)
                         }
@@ -800,6 +881,7 @@ impl<'a> Checker<'a> {
                                     );
                                     return Err(CheckerError::TypeError(*inner.clone(), got));
                                 }
+                                if *method == "insert" { self.consume_var(val, "set element"); }
                             }
                             if *method == "insert" { Ok(Type::Void) } else { Ok(Type::Bool) }
                         }
@@ -808,6 +890,32 @@ impl<'a> Checker<'a> {
                             Ok(Type::Void)
                         }
                     },
+                    // Built-in str ops (on the const char* `str` type)
+                    Type::Str => {
+                        for arg in args { self.check_expr(arg)?; }
+                        match *method {
+                            "len" | "index_of" | "to_int"        => Ok(Type::Int),
+                            "to_float"                            => Ok(Type::Float),
+                            "contains" | "starts_with"
+                                | "ends_with"                     => Ok(Type::Bool),
+                            "char_at" | "slice" | "trim"
+                                | "to_upper" | "to_lower"
+                                | "replace"                       => Ok(Type::Str),
+                            "split"                               => Ok(Type::Vec(Box::new(Type::Str))),
+                            // `.to_object()` is typed by the binding it flows into
+                            "to_object"                           => Ok(Type::Void),
+                            _ => {
+                                if let Some(key) = Self::prim_key(&obj_ty) {
+                                    if let Some(pm) = self.primitive_impls.get(key) {
+                                        if let Some(mi) = pm.get(*method) {
+                                            return Ok(mi.return_type.clone());
+                                        }
+                                    }
+                                }
+                                Ok(Type::Void)
+                            }
+                        }
+                    }
                     // Net type method calls
                     Type::Named(cls) if matches!(cls.as_str(), "TcpListener" | "TcpStream" | "UdpSocket") => {
                         for arg in args { self.check_expr(arg)?; }
@@ -859,6 +967,12 @@ impl<'a> Checker<'a> {
             // ── Class / OOP expressions ───────────────────────────────────────
             Expr::FieldAccess(obj, field) => {
                 let obj_ty = self.check_expr(obj)?;
+                if let Type::Struct(fields) = &obj_ty {
+                    if let Some((_, ty)) = fields.iter().find(|(n, _)| n == *field) {
+                        return Ok(ty.clone());
+                    }
+                    return Ok(Type::Void);
+                }
                 if let Type::Named(cls) = &obj_ty {
                     if cls == "UdpPacket" {
                         return match *field {
@@ -882,7 +996,12 @@ impl<'a> Checker<'a> {
                 Ok(Type::Void)
             }
             Expr::New(name, args) => {
-                for arg in args { self.check_expr(arg)?; }
+                // Constructor args are stored into the new value → move (class ctor).
+                // Builtin collection/net ctors take copy-type args (caps/ports) → no-op.
+                for arg in args {
+                    self.check_expr(arg)?;
+                    self.consume_var(arg, &format!("{}(...)", name));
+                }
                 if *name == "Channel" { return Ok(Type::Void); }
                 Ok(Type::Named(name.to_string()))
             }
@@ -891,8 +1010,22 @@ impl<'a> Checker<'a> {
                 Ok(Type::Named(name.to_string()))
             }
             Expr::NewFields(name, fields) => {
-                for (_, val) in fields { self.check_expr(val)?; }
+                for (fname, val) in fields {
+                    self.check_expr(val)?;
+                    self.consume_var(val, &format!("{}.{}", name, fname));
+                }
                 Ok(Type::Named(name.to_string()))
+            }
+            Expr::ObjectLiteral(fields) => {
+                let mut tys: Vec<(String, Type)> = Vec::with_capacity(fields.len());
+                for (fname, val) in fields {
+                    let fty = self.check_expr(val)?;
+                    self.consume_var(val, &format!("object field `{}`", fname));
+                    tys.push((fname.to_string(), fty));
+                }
+                // structural identity: sort fields by name
+                tys.sort_by(|a, b| a.0.cmp(&b.0));
+                Ok(Type::Struct(tys))
             }
         }
     }

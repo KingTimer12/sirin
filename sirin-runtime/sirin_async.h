@@ -13,6 +13,7 @@ void sirin_loop_init(void);
 void sirin_loop_run(void);
 void sirin_spawn(SirinCoroutineFn fn, void* arg);
 void sirin_yield(void);
+int  sirin_in_coroutine(void);
 
 typedef struct SirinChannel SirinChannel;
 SirinChannel* sirin_channel_new(void);

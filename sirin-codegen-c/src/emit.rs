@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::Hasher;
 
 use sirin_parser::{
     expr::{BinOp, Expr},
@@ -47,6 +48,9 @@ pub struct Emitter {
     /// inline C declarations for named-type collections (Vec[ClassName], etc.)
     /// key = "Vec_ClassName", value = full C typedef + impl
     named_collection_decls: RefCell<HashMap<String, String>>,
+    /// names of module-level (global) variables — emitted as file-scope C globals;
+    /// assignments to these emit as `name = val` instead of redeclaring
+    globals: HashSet<String>,
 }
 
 // True if any Stmt::Return in stmts (recursively) has value = Expr::Call(fn_name, _)
@@ -384,6 +388,7 @@ impl Emitter {
             spawn_count: 0,
             spawn_decls: String::new(),
             named_collection_decls: RefCell::new(HashMap::new()),
+            globals: HashSet::new(),
         }
     }
 
@@ -393,7 +398,11 @@ impl Emitter {
         Self {
             output: String::new(),
             depth: 1,
-            vars: HashMap::new(),
+            // seed with global var types so inference works inside spawn bodies
+            vars: self.vars.iter()
+                .filter(|(k, _)| self.globals.contains(*k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             fns: self.fns.clone(),
             current_fn: None,
             current_fn_params: Vec::new(),
@@ -413,6 +422,7 @@ impl Emitter {
             spawn_count: self.spawn_count,
             spawn_decls: String::new(),
             named_collection_decls: RefCell::new(self.named_collection_decls.borrow().clone()),
+            globals: self.globals.clone(),
         }
     }
 
@@ -513,7 +523,7 @@ fn collect_expr_vars<'a>(expr: &Expr<'a>, out: &mut std::collections::HashSet<St
         }
         Expr::FieldAccess(obj, _) => collect_expr_vars(&obj.node, out),
         Expr::Array(items) => { for i in items { collect_expr_vars(&i.node, out); } }
-        Expr::NewFields(_, fields) => {
+        Expr::NewFields(_, fields) | Expr::ObjectLiteral(fields) => {
             for (_, v) in fields { collect_expr_vars(&v.node, out); }
         }
         _ => {}
@@ -538,6 +548,9 @@ fn collect_stmt_vars<'a>(stmt: &Stmt<'a>, out: &mut std::collections::HashSet<St
         Stmt::Fn { body, .. } => {
             for s in body { collect_stmt_vars(&s.node, out); }
         }
+        Stmt::Spawn { body } => {
+            for s in body { collect_stmt_vars(&s.node, out); }
+        }
         _ => {}
     }
 }
@@ -546,6 +559,80 @@ fn collect_body_vars<'a>(stmts: &[sirin_parser::span::Spanned<Stmt<'a>>]) -> std
     let mut vars = std::collections::HashSet::new();
     for s in stmts { collect_stmt_vars(&s.node, &mut vars); }
     vars
+}
+
+/// Collect variable names whose ownership *escapes* the current scope — i.e. they
+/// are moved into another binding/aggregate, returned, sent on a channel, or freed
+/// manually. Such vars must NOT be auto-freed (would double-free / use-after-free).
+/// Borrowing reads (function args, method receivers, printing) do NOT escape.
+fn collect_escaped_expr<'a>(e: &Expr<'a>, out: &mut HashSet<String>) {
+    let mark = |o: &mut HashSet<String>, x: &Expr<'a>| {
+        if let Expr::Var(v) = x { o.insert(v.to_string()); }
+    };
+    match e {
+        Expr::Array(items) => {
+            for it in items { mark(out, &it.node); collect_escaped_expr(&it.node, out); }
+        }
+        Expr::ObjectLiteral(fs) | Expr::NewFields(_, fs) => {
+            for (_, val) in fs { mark(out, &val.node); collect_escaped_expr(&val.node, out); }
+        }
+        Expr::New(_, args) => {
+            for a in args { mark(out, &a.node); collect_escaped_expr(&a.node, out); }
+        }
+        Expr::MethodCall(obj, method, args) => {
+            if *method == "free" { mark(out, &obj.node); }
+            if matches!(*method, "push" | "insert" | "send") {
+                for a in args { mark(out, &a.node); }
+            }
+            collect_escaped_expr(&obj.node, out);
+            for a in args { collect_escaped_expr(&a.node, out); }
+        }
+        Expr::Call(_, args) => { for a in args { collect_escaped_expr(&a.node, out); } }
+        Expr::BinOp(_, l, r) => { collect_escaped_expr(&l.node, out); collect_escaped_expr(&r.node, out); }
+        Expr::Neg(x) | Expr::Not(x) | Expr::Await(x) => collect_escaped_expr(&x.node, out),
+        Expr::Index(b, i) => { collect_escaped_expr(&b.node, out); collect_escaped_expr(&i.node, out); }
+        Expr::FieldAccess(o, _) => collect_escaped_expr(&o.node, out),
+        _ => {}
+    }
+}
+
+fn collect_escaped_stmt<'a>(s: &Stmt<'a>, out: &mut HashSet<String>) {
+    match s {
+        // `=` rhs that is a bare var is a move; `:=` clones so its rhs is NOT moved.
+        Stmt::Let { rhs, .. } => {
+            if let Expr::Var(v) = &rhs.node { out.insert(v.to_string()); }
+            collect_escaped_expr(&rhs.node, out);
+        }
+        Stmt::CopyLet { rhs, .. } => collect_escaped_expr(&rhs.node, out),
+        Stmt::Expr(e) => collect_escaped_expr(&e.node, out),
+        Stmt::Return { value, cond } => {
+            if let Some(v) = value {
+                if let Expr::Var(n) = &v.node { out.insert(n.to_string()); }
+                collect_escaped_expr(&v.node, out);
+            }
+            if let Some(c) = cond { collect_escaped_expr(&c.node, out); }
+        }
+        Stmt::If { cond, then, else_ } => {
+            collect_escaped_expr(&cond.node, out);
+            for st in then { collect_escaped_stmt(&st.node, out); }
+            if let Some(e) = else_ { for st in e { collect_escaped_stmt(&st.node, out); } }
+        }
+        // A coroutine may outlive the spawning scope and aliases captured values,
+        // so conservatively treat every var it references as escaped (never free).
+        Stmt::Spawn { body } => {
+            let mut used = HashSet::new();
+            for st in body { collect_stmt_vars(&st.node, &mut used); }
+            out.extend(used);
+            for st in body { collect_escaped_stmt(&st.node, out); }
+        }
+        _ => {}
+    }
+}
+
+/// True if `body`'s last top-level statement is a `return` (so trailing Drop code
+/// would be unreachable).
+fn ends_with_return<'a>(body: &[Spanned<Stmt<'a>>]) -> bool {
+    matches!(body.last().map(|s| &s.node), Some(Stmt::Return { .. }))
 }
 
 /// Emit sirin_yield() before an expression if it contains .await.
@@ -709,6 +796,43 @@ impl Emitter {
                     return;
                 }
 
+                // Typed JSON deserialize: `x: SomeStruct = jsontext.to_object()`
+                // Compiler knows the target shape, so emit field-by-field extraction.
+                if let (Expr::MethodCall(obj, "to_object", _), Type::Struct(fields)) = (&rhs.node, ty) {
+                    let src = self.emit_expr(&obj.node);
+                    let cty = self.type_to_c(ty);
+                    let tmp = format!("__json_{}", name.node);
+                    self.output.push_str(&format!(
+                        "{}const char* {} = {};\n", self.indent(), tmp, src));
+                    let inits = fields.iter().map(|(fname, fty)| {
+                        let getter = match fty {
+                            Type::Str   => "sirin_json_get_str",
+                            Type::Float => "sirin_json_get_float",
+                            Type::Bool  => "sirin_json_get_bool",
+                            t if t.is_integer() => "sirin_json_get_int",
+                            _ => "sirin_json_get_str",
+                        };
+                        format!(".{} = {}({}, \"{}\")", fname, getter, tmp, fname)
+                    }).collect::<Vec<_>>().join(", ");
+                    let is_global = self.globals.contains(name.node);
+                    let lhs = if is_global {
+                        format!("{}{}", self.indent(), name.node)
+                    } else {
+                        format!("{}{} {}", self.indent(), cty, name.node)
+                    };
+                    self.vars.insert(name.node.to_string(), ty.clone());
+                    self.output.push_str(&format!("{} = ({}){{ {} }};\n", lhs, cty, inits));
+                    return;
+                }
+
+                // Globals are declared at file scope → assign without a type prefix.
+                let is_global = self.globals.contains(name.node);
+                let lhs = if is_global {
+                    format!("{}{}", self.indent(), name.node)
+                } else {
+                    format!("{}{} {}", self.indent(), self.type_to_c(ty), name.node)
+                };
+
                 // Collection constructor (Vec/Array/Map/Set) with declared type
                 // → use type-specific constructor instead of generic fallback
                 if let Expr::Call(ctor, ctor_args) = &rhs.node {
@@ -718,34 +842,22 @@ impl Emitter {
                             let cap = ctor_args.first()
                                 .map(|a| self.emit_expr(&a.node))
                                 .unwrap_or_else(|| "4".to_string());
-                            Some(format!(
-                                "{}{} {} = sirin_vec_{}_new({});\n",
-                                self.indent(), self.type_to_c(ty), name.node, snake, cap
-                            ))
+                            Some(format!("{} = sirin_vec_{}_new({});\n", lhs, snake, cap))
                         }
                         ("Array", Type::Array(inner)) => {
                             let (_, snake) = collection_suffix_for(inner);
                             let cap = ctor_args.first()
                                 .map(|a| self.emit_expr(&a.node))
                                 .unwrap_or_else(|| "4".to_string());
-                            Some(format!(
-                                "{}{} {} = sirin_array_{}_new({});\n",
-                                self.indent(), self.type_to_c(ty), name.node, snake, cap
-                            ))
+                            Some(format!("{} = sirin_array_{}_new({});\n", lhs, snake, cap))
                         }
                         ("Map", Type::Map(_, val)) => {
                             let (_, vs) = collection_suffix_for(val);
-                            Some(format!(
-                                "{}{} {} = sirin_map_str_{}_new();\n",
-                                self.indent(), self.type_to_c(ty), name.node, vs
-                            ))
+                            Some(format!("{} = sirin_map_str_{}_new();\n", lhs, vs))
                         }
                         ("Set", Type::Set(inner)) => {
                             let (_, snake) = collection_suffix_for(inner);
-                            Some(format!(
-                                "{}{} {} = sirin_set_{}_new();\n",
-                                self.indent(), self.type_to_c(ty), name.node, snake
-                            ))
+                            Some(format!("{} = sirin_set_{}_new();\n", lhs, snake))
                         }
                         _ => None,
                     };
@@ -756,15 +868,14 @@ impl Emitter {
                     }
                 }
 
-                let value = self.emit_expr(&rhs.node);
+                let mut value = self.emit_expr(&rhs.node);
+                // `:=` is a real deep copy. For strings, clone the buffer so the new
+                // binding owns its own memory (otherwise free would double-free).
+                if matches!(stmt, Stmt::CopyLet { .. }) && matches!(ty, Type::Str) {
+                    value = format!("sirin_str_clone({})", value);
+                }
                 self.vars.insert(name.node.to_string(), ty.clone());
-                self.output.push_str(&format!(
-                    "{}{} {} = {};\n",
-                    self.indent(),
-                    self.type_to_c(ty),
-                    name.node,
-                    value
-                ));
+                self.output.push_str(&format!("{} = {};\n", lhs, value));
             }
             Stmt::Return { cond, value } => {
                 // Detect TCO: return value is a direct call to the current function
@@ -898,6 +1009,13 @@ impl Emitter {
                 }
                 for s in body {
                     self.emit_stmt(&s.node);
+                }
+
+                // Drop owned heap-string locals on fall-through (skip TCO loops and
+                // bodies ending in `return`, where the free would be unreachable).
+                if !tco && !ends_with_return(body) {
+                    let refs: Vec<&Spanned<Stmt>> = body.iter().collect();
+                    self.emit_str_drops(&refs);
                 }
 
                 self.vars = outer_vars;
@@ -1438,6 +1556,41 @@ impl Emitter {
                             format!("{}_{}({}, {})", cls, method, receiver, args_str)
                         }
                     }
+                    Type::Str => {
+                        let one = || args.first().map(|a| self.emit_expr(&a.node)).unwrap_or_default();
+                        match *method {
+                            "len"         => format!("sirin_str_len({})", obj_str),
+                            "char_at"     => format!("sirin_str_char_at({}, {})", obj_str, args_str),
+                            "slice"       => format!("sirin_str_slice({}, {})", obj_str, args_str),
+                            "index_of"    => format!("sirin_str_index_of({}, {})", obj_str, args_str),
+                            "contains"    => format!("sirin_str_contains({}, {})", obj_str, args_str),
+                            "starts_with" => format!("sirin_str_starts_with({}, {})", obj_str, args_str),
+                            "ends_with"   => format!("sirin_str_ends_with({}, {})", obj_str, args_str),
+                            "trim"        => format!("sirin_str_trim({})", obj_str),
+                            "to_int"      => format!("sirin_str_to_int({})", obj_str),
+                            "to_float"    => format!("sirin_str_to_float({})", obj_str),
+                            "to_upper"    => format!("sirin_str_to_upper({})", obj_str),
+                            "to_lower"    => format!("sirin_str_to_lower({})", obj_str),
+                            "replace"     => format!("sirin_str_replace({}, {})", obj_str, args_str),
+                            "split"       => {
+                                self.used_types.borrow_mut().insert("SIRIN_USE_VEC_STR".to_string());
+                                format!("sirin_str_split({}, {})", obj_str, one())
+                            }
+                            // typed deserialize handled in `let` binding; raw passthrough otherwise
+                            "to_object"   => obj_str.clone(),
+                            _ => {
+                                if self.prim_methods.get("str").map_or(false, |s| s.contains(*method)) {
+                                    if args_str.is_empty() {
+                                        format!("str_{}({})", method, obj_str)
+                                    } else {
+                                        format!("str_{}({}, {})", method, obj_str, args_str)
+                                    }
+                                } else {
+                                    format!("{}.{}({})", obj_str, method, args_str)
+                                }
+                            }
+                        }
+                    }
                     _ => {
                         // Check primitive impl methods registered via `impl T`
                         let prefix = match &obj_ty {
@@ -1499,11 +1652,27 @@ impl Emitter {
                     .collect::<Vec<_>>().join(", ");
                 format!("({}){{ {} }}", name, inits)
             }
+            Expr::ObjectLiteral(fields) => {
+                let struct_ty = self.get_expr(expr);
+                let cty = self.type_to_c(&struct_ty);
+                let inits = fields.iter()
+                    .map(|(fname, fval)| format!(".{} = {}", fname, self.emit_expr(&fval.node)))
+                    .collect::<Vec<_>>().join(", ");
+                format!("({}){{ {} }}", cty, inits)
+            }
             Expr::Neg(expr) => format!("(-{})", self.emit_expr(&expr.node)),
             Expr::Not(expr) => format!("(!{})", self.emit_expr(&expr.node)),
             Expr::BinOp(op, lhs, rhs) => {
                 let l = self.emit_expr(&lhs.node);
                 let r = self.emit_expr(&rhs.node);
+                // String equality: pointer compare is wrong → use strcmp
+                if matches!(op, BinOp::Eq | BinOp::NotEq)
+                    && (matches!(self.get_expr(&lhs.node), Type::Str)
+                        || matches!(self.get_expr(&rhs.node), Type::Str))
+                {
+                    let cmp = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
+                    return format!("(strcmp({}, {}) {} 0)", l, r, cmp);
+                }
                 let op = match op {
                     BinOp::Add => "+",
                     BinOp::Sub => "-",
@@ -1577,6 +1746,22 @@ impl Emitter {
                 "UdpPacket"   => "SirinUdpPacket".to_string(),
                 _             => n.clone(),
             },
+            Type::Struct(fields) => {
+                // Synthetic struct: name derived from the (sorted) field signature so
+                // two literals of the same shape share one C typedef (structural typing).
+                let mut sig = String::new();
+                let mut body = String::new();
+                for (fname, fty) in fields {
+                    let ct = self.type_to_c(fty);
+                    sig.push_str(&format!("{}:{};", fname, ct));
+                    body.push_str(&format!("    {} {};\n", ct, fname));
+                }
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                hasher.write(sig.as_bytes());
+                let sname = format!("__sirin_obj_{:016x}", hasher.finish());
+                self.register_anon_struct(&sname, &body);
+                sname
+            }
             Type::Channel(_) => "SirinChannel*".to_string(),
         };
         if let Some(define) = ty_to_define(ty) {
@@ -1653,6 +1838,15 @@ impl Emitter {
                         "contains" => Type::Bool,
                         _ => Type::Void,
                     },
+                    Type::Str => match *method {
+                        "len" | "index_of" | "to_int" => Type::Int,
+                        "to_float" => Type::Float,
+                        "contains" | "starts_with" | "ends_with" => Type::Bool,
+                        "char_at" | "slice" | "trim" | "to_upper"
+                            | "to_lower" | "replace" => Type::Str,
+                        "split" => Type::Vec(Box::new(Type::Str)),
+                        _ => Type::Void,
+                    },
                     Type::Named(cls) => {
                         // Net static constructor
                         if matches!(&obj.node, Expr::NewDefault("TcpStream") | Expr::Var("TcpStream")) && *method == "connect" {
@@ -1684,6 +1878,12 @@ impl Emitter {
             }
             Expr::FieldAccess(obj, field) => {
                 let obj_ty = self.get_expr(&obj.node);
+                if let Type::Struct(fields) = &obj_ty {
+                    if let Some((_, ty)) = fields.iter().find(|(n, _)| n.as_str() == *field) {
+                        return ty.clone();
+                    }
+                    return Type::Void;
+                }
                 if let Type::Named(cls) = &obj_ty {
                     // UdpPacket field types
                     if cls == "UdpPacket" {
@@ -1703,6 +1903,13 @@ impl Emitter {
             }
             Expr::New(name, _) | Expr::NewDefault(name) | Expr::NewFields(name, _) => {
                 Type::Named(name.to_string())
+            }
+            Expr::ObjectLiteral(fields) => {
+                let mut tys: Vec<(String, Type)> = fields.iter()
+                    .map(|(n, v)| (n.to_string(), self.get_expr(&v.node)))
+                    .collect();
+                tys.sort_by(|a, b| a.0.cmp(&b.0));
+                Type::Struct(tys)
             }
         }
     }
@@ -1760,6 +1967,31 @@ impl Emitter {
         }
 
         for s in &class_stmts { self.emit_stmt(&s.node); }
+
+        // Module-level Let/CopyLet that are referenced inside a function (or a
+        // spawn body) become file-scope C globals so the function can share them.
+        // Vars only used in `main` stay local — preserves array-literal locals etc.
+        let mut fn_refs = std::collections::HashSet::new();
+        for s in &fn_stmts { collect_stmt_vars(&s.node, &mut fn_refs); }
+        for s in &rest {
+            if let Stmt::Spawn { .. } = &s.node { collect_stmt_vars(&s.node, &mut fn_refs); }
+        }
+        let mut emitted_global = false;
+        for s in &rest {
+            if let Stmt::Let { name, ty: declared, rhs }
+                 | Stmt::CopyLet { name, ty: declared, rhs } = &s.node {
+                if !fn_refs.contains(name.node) { continue; }
+                let inferred = self.get_expr(&rhs.node);
+                let ty = declared.clone().unwrap_or(inferred);
+                let cty = self.type_to_c(&ty);
+                self.globals.insert(name.node.to_string());
+                self.vars.insert(name.node.to_string(), ty);
+                self.output.push_str(&format!("static {} {};\n", cty, name.node));
+                emitted_global = true;
+            }
+        }
+        if emitted_global { self.output.push('\n'); }
+
         for s in &fn_stmts    { self.emit_stmt(&s.node); }
 
         // Remember where to insert spawn declarations (after fns, before main)
@@ -1778,6 +2010,9 @@ impl Emitter {
             }
             self.depth += 1;
             for s in &rest { self.emit_stmt(&s.node); }
+            // Drop owned heap-string locals before main exits (vars captured by a
+            // spawn are treated as escaped, so coroutines never see freed memory).
+            self.emit_str_drops(&rest);
             self.depth -= 1;
             if self.async_imported {
                 self.output.push_str("    sirin_loop_run();\n");
@@ -1825,6 +2060,57 @@ impl Emitter {
             "Map"   => named_map_impl(pascal, snake, c_type),
             _       => return,
         };
+        self.named_collection_decls.borrow_mut().insert(key, decl);
+    }
+
+    /// A let-binding owns heap string memory when its RHS allocates one. Literals,
+    /// params, field reads and plain fn-call returns are NOT owned here — conservative
+    /// so auto-free never touches a static literal (which would crash).
+    fn is_heap_str_rhs<'a>(&self, is_copylet: bool, rhs: &Expr<'a>) -> bool {
+        if is_copylet {
+            return matches!(self.get_expr(rhs), Type::Str); // `:=` clones → owned heap
+        }
+        match rhs {
+            Expr::Call(n, _) if *n == "readln" => true,
+            Expr::MethodCall(obj, m, _) =>
+                matches!(self.get_expr(&obj.node), Type::Str)
+                    && matches!(*m, "to_upper" | "to_lower" | "slice" | "trim" | "replace" | "char_at"),
+            _ => false,
+        }
+    }
+
+    /// Emit `sirin_cstr_free` for owned heap-string locals in `body` that don't
+    /// escape. Conservative: only top-level Let/CopyLet declared exactly once,
+    /// non-global, non-escaping, heap-allocating. Misses leak; never double-frees.
+    fn emit_str_drops<'a>(&mut self, body: &[&Spanned<Stmt<'a>>]) {
+        let mut escaped = HashSet::new();
+        for s in body { collect_escaped_stmt(&s.node, &mut escaped); }
+
+        let mut decl_count: HashMap<&str, u32> = HashMap::new();
+        for s in body {
+            if let Stmt::Let { name, .. } | Stmt::CopyLet { name, .. } = &s.node {
+                *decl_count.entry(name.node).or_default() += 1;
+            }
+        }
+        for s in body {
+            if let Stmt::Let { name, rhs, .. } | Stmt::CopyLet { name, rhs, .. } = &s.node {
+                let is_cl = matches!(&s.node, Stmt::CopyLet { .. });
+                if self.globals.contains(name.node) { continue; }
+                if escaped.contains(name.node) { continue; }
+                if decl_count.get(name.node).copied().unwrap_or(0) != 1 { continue; }
+                if self.is_heap_str_rhs(is_cl, &rhs.node) {
+                    self.output.push_str(&format!(
+                        "{}sirin_cstr_free({});\n", self.indent(), name.node));
+                }
+            }
+        }
+    }
+
+    /// Register a synthetic typedef for an anonymous object-literal struct.
+    fn register_anon_struct(&self, name: &str, body: &str) {
+        let key = format!("Struct_{name}");
+        if self.named_collection_decls.borrow().contains_key(&key) { return; }
+        let decl = format!("typedef struct {{\n{}}} {};\n", body, name);
         self.named_collection_decls.borrow_mut().insert(key, decl);
     }
 

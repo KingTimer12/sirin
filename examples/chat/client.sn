@@ -4,20 +4,24 @@ use sirin.net
 
 async fn read_loop(conn: TcpStream) {
     msg = conn.read().await
+    if (msg == "") {
+        return
+    }
     println(msg)
     return read_loop(conn)
 }
 
 async fn write_loop(conn: TcpStream) {
     line = readln()
+    if (line == "") {
+        return
+    }
     conn.write(line)
     return write_loop(conn)
 }
 
-conn = TcpStream.connect("127.0.0.1", 3000).await
+conn = TcpStream.connect("127.0.0.1", 3000)
 println("conectado ao servidor")
 
-spawn {
-    read_loop(conn)
-}
-write_loop(conn).await
+spawn read_loop(conn)
+spawn write_loop(conn)

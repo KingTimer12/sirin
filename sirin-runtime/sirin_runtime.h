@@ -15,6 +15,29 @@ SirinStr sirin_str_copy(SirinStr s);
 void     sirin_str_free(SirinStr s);
 int      sirin_str_eq(SirinStr a, SirinStr b);
 
+/* ── str ops on plain const char* (the language `str` type) ───────────────── */
+const char* sirin_str_clone(const char* s);   /* deep copy — backs `:=` clone   */
+void        sirin_cstr_free(const char* s);   /* free an owned heap str (Drop)  */
+int64_t     sirin_str_len(const char* s);
+const char* sirin_str_char_at(const char* s, int64_t i);
+const char* sirin_str_slice(const char* s, int64_t start, int64_t end);
+int64_t     sirin_str_index_of(const char* s, const char* sub);
+int         sirin_str_contains(const char* s, const char* sub);
+int         sirin_str_starts_with(const char* s, const char* pre);
+int         sirin_str_ends_with(const char* s, const char* suf);
+const char* sirin_str_trim(const char* s);
+int64_t     sirin_str_to_int(const char* s);
+double      sirin_str_to_float(const char* s);
+const char* sirin_str_to_upper(const char* s);
+const char* sirin_str_to_lower(const char* s);
+const char* sirin_str_replace(const char* s, const char* from, const char* to);
+
+/* ── minimal JSON field extraction (drives typed `.to_object()`) ──────────── */
+const char* sirin_json_get_str(const char* json, const char* key);
+int64_t     sirin_json_get_int(const char* json, const char* key);
+double      sirin_json_get_float(const char* json, const char* key);
+int         sirin_json_get_bool(const char* json, const char* key);
+
 /* Pointer alias so const char* works as a macro CType without breaking CType* */
 typedef const char* SirinCStr;
 
@@ -65,6 +88,7 @@ SIRIN_VEC_DECL(Bool,  bool,  int)
 #endif
 #ifdef SIRIN_USE_VEC_STR
 SIRIN_VEC_DECL(Str,   str,   SirinCStr)
+SirinVecStr sirin_str_split(const char* s, const char* sep);
 #endif
 
 /* ── Array (fixed-size literal; same layout as Vec) ───────────────────────── */

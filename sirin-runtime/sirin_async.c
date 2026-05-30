@@ -6,6 +6,7 @@
 #include "sirin_async.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /* ── Channel implementation (shared between all platforms) ─────────────────── */
 
@@ -55,6 +56,7 @@ static VOID WINAPI coro_entry(LPVOID lpParam) {
 }
 
 void sirin_loop_init(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);  /* real-time output under pipes */
     s_main_fiber = ConvertThreadToFiber(NULL);
     s_count   = 0;
     s_current = -1;
@@ -88,6 +90,10 @@ void sirin_yield(void) {
     if (s_current >= 0) {
         SwitchToFiber(s_main_fiber);
     }
+}
+
+int sirin_in_coroutine(void) {
+    return s_current >= 0;
 }
 
 void sirin_channel_send(SirinChannel* ch, void* value) {
@@ -130,6 +136,7 @@ static void coro_entry(void) {
 }
 
 void sirin_loop_init(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);  /* real-time output under pipes */
     s_count   = 0;
     s_current = -1;
     memset(s_done, 0, sizeof(s_done));
@@ -170,6 +177,10 @@ void sirin_yield(void) {
         swapcontext(&s_coro_ctx[id], &s_main_ctx);
         s_current = id;
     }
+}
+
+int sirin_in_coroutine(void) {
+    return s_current >= 0;
 }
 
 void sirin_channel_send(SirinChannel* ch, void* value) {

@@ -72,9 +72,29 @@ pub fn parser<'a>()
         .then(ty_atom_or_named.clone())
         .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket));
 
+    // Anonymous struct type annotation: { idade: int, nome: str }
+    // Fields kept sorted by name for structural identity (matches literal inference).
+    let struct_ty = ident_name
+        .clone()
+        .then_ignore(just(Tokens::Colon))
+        .then(ty_atom_or_named.clone())
+        .separated_by(just(Tokens::Comma))
+        .at_least(1)
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd))
+        .map(|fields: Vec<(&str, Type)>| {
+            let mut tys: Vec<(String, Type)> =
+                fields.into_iter().map(|(n, t)| (n.to_string(), t)).collect();
+            tys.sort_by(|a, b| a.0.cmp(&b.0));
+            Type::Struct(tys)
+        })
+        .boxed();
+
     // Boxed: used in arg and return-type positions; stops type from infecting stmt chain
     // Named added as fallback for user-defined class types (any remaining Ident)
     let ty = choice((
+        struct_ty,
         just(Tokens::ArrayType)
             .ignore_then(bracket.clone())
             .map(|t| Type::Array(Box::new(t))),
@@ -168,6 +188,21 @@ pub fn parser<'a>()
                     Spanned::new(Expr::NewFields(name, fields), sp(extra.span()))
                 });
 
+            // Anonymous object literal: { nome: "Julius", idade: 24 }
+            // Distinct from a code block: only reachable in expression position.
+            let obj_literal = ident_name
+                .clone()
+                .then_ignore(just(Tokens::Colon))
+                .then(p.clone())
+                .separated_by(just(Tokens::Comma))
+                .at_least(1)
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd))
+                .map_with(|fields, extra| {
+                    Spanned::new(Expr::ObjectLiteral(fields), sp(extra.span()))
+                });
+
             // Collection constructors: Vec(n), Map(), Set(), Array(n)
             let ctor_args = || {
                 p.clone()
@@ -199,6 +234,7 @@ pub fn parser<'a>()
                 .or(map_ctor)
                 .or(set_ctor)
                 .or(array_ctor)
+                .or(obj_literal)
                 .or(new_fields)
                 .or(call)
                 .or(self_expr)
@@ -470,13 +506,15 @@ pub fn parser<'a>()
                 )
             });
 
+        // `spawn { stmt* }` — block form (one coroutine, statements run in order)
+        let spawn_block = decl.clone()
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd));
+        // `spawn stmt` — braceless sugar for a single-statement coroutine
+        let spawn_single = decl.clone().map(|s| vec![s]);
         let spawn_stmt = just(Tokens::Spawn)
-            .ignore_then(
-                decl.clone()
-                    .repeated()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
-            )
+            .ignore_then(spawn_block.or(spawn_single))
             .map_with(|body, extra| {
                 Spanned::new(Stmt::Spawn { body }, sp(extra.span()))
             });

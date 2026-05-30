@@ -18,5 +18,9 @@ async fn consumer(c: Channel[int], n: int) {
     }
 }
 
-producer(ch, 5).await
-consumer(ch, 5).await
+spawn {
+    producer(ch, 5)
+}
+spawn {
+    consumer(ch, 5)
+}

@@ -2,21 +2,34 @@ use sirin.io
 use sirin.async
 use sirin.net
 
-async fn handle_client(conn: TcpStream, id: int) {
-    msg = conn.read().await
-    conn.write(msg)
-    return handle_client(conn, id)
+clients: Vec[TcpStream] = Vec()
+
+fn broadcast_at(msg: str, i: int) {
+    if (i < clients.len()) {
+        c = clients.get(i)
+        c.write(msg)
+        return broadcast_at(msg, i + 1)
+    }
 }
 
-async fn accept_loop(l: TcpListener, id: int) {
-    conn = l.accept().await
-    spawn {
-        handle_client(conn, id)
+async fn handle_client(conn: TcpStream) {
+    msg = conn.read().await
+    if (msg == "") {
+        return
     }
-    return accept_loop(l, id + 1)
+    broadcast_at(msg, 0)
+    return handle_client(conn)
+}
+
+async fn accept_loop(l: TcpListener) {
+    conn = l.accept().await
+    registro := conn
+    clients.push(registro)
+    handle_client(conn).await
+    return accept_loop(l)
 }
 
 listener = TcpListener("0.0.0.0", 3000)
 println("servidor ouvindo na porta 3000")
 
-accept_loop(listener, 1).await
+spawn accept_loop(listener)

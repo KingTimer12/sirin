@@ -19,6 +19,8 @@ pub enum Expr<'a> {
     New(&'a str, Vec<Spanned<Expr<'a>>>),
     NewDefault(&'a str),
     NewFields(&'a str, Vec<(&'a str, Spanned<Expr<'a>>)>),
+    // anonymous object literal: { nome: "Julius", idade: 24 }
+    ObjectLiteral(Vec<(&'a str, Spanned<Expr<'a>>)>),
 }
 
 #[derive(Debug, Clone)]

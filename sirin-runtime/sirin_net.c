@@ -4,20 +4,27 @@
     #pragma comment(lib, "ws2_32.lib")
     #define SIRIN_SOCK_INIT() do { WSADATA _w; WSAStartup(MAKEWORD(2,2), &_w); } while(0)
     #define SIRIN_SOCK_CLOSE(fd) closesocket(fd)
+    #define SIRIN_SET_NONBLOCK(fd) do { u_long _m = 1; ioctlsocket(fd, FIONBIO, &_m); } while(0)
+    #define SIRIN_WOULD_BLOCK() (WSAGetLastError() == WSAEWOULDBLOCK)
     typedef int socklen_t;
 #else
     #include <sys/socket.h>
     #include <netinet/in.h>
     #include <arpa/inet.h>
     #include <unistd.h>
+    #include <fcntl.h>
+    #include <errno.h>
     #define SIRIN_SOCK_INIT() do {} while(0)
     #define SIRIN_SOCK_CLOSE(fd) close(fd)
+    #define SIRIN_SET_NONBLOCK(fd) do { int _f = fcntl(fd, F_GETFL, 0); fcntl(fd, F_SETFL, _f | O_NONBLOCK); } while(0)
+    #define SIRIN_WOULD_BLOCK() (errno == EAGAIN || errno == EWOULDBLOCK)
 #endif
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "sirin_net.h"
+#include "sirin_async.h"
 
 void sirin_net_init(void) {
     SIRIN_SOCK_INIT();
@@ -52,6 +59,7 @@ SirinTcpListener sirin_tcp_listener_bind(const char* addr, int port) {
         fprintf(stderr, "sirin_net: listen() failed\n");
         exit(1);
     }
+    SIRIN_SET_NONBLOCK(fd);
     SirinTcpListener l;
     l.fd = fd;
     return l;
@@ -60,8 +68,15 @@ SirinTcpListener sirin_tcp_listener_bind(const char* addr, int port) {
 SirinTcpStream sirin_tcp_listener_accept(SirinTcpListener* l) {
     struct sockaddr_in client;
     socklen_t len = sizeof(client);
-    int cfd = (int)accept(l->fd, (struct sockaddr*)&client, &len);
-    if (cfd < 0) { fprintf(stderr, "sirin_net: accept() failed\n"); exit(1); }
+    int cfd;
+    for (;;) {
+        len = sizeof(client);
+        cfd = (int)accept(l->fd, (struct sockaddr*)&client, &len);
+        if (cfd >= 0) break;
+        if (SIRIN_WOULD_BLOCK()) { sirin_yield(); continue; }
+        fprintf(stderr, "sirin_net: accept() failed\n"); exit(1);
+    }
+    SIRIN_SET_NONBLOCK(cfd);
     SirinTcpStream s;
     s.fd = cfd;
     return s;
@@ -82,6 +97,7 @@ SirinTcpStream sirin_tcp_stream_connect(const char* addr, int port) {
         fprintf(stderr, "sirin_net: connect() failed to %s:%d\n", addr, port);
         exit(1);
     }
+    SIRIN_SET_NONBLOCK(fd);
     SirinTcpStream s;
     s.fd = fd;
     return s;
@@ -90,9 +106,14 @@ SirinTcpStream sirin_tcp_stream_connect(const char* addr, int port) {
 const char* sirin_tcp_stream_read(SirinTcpStream* s) {
     char* buf = (char*)malloc(SIRIN_TCP_READ_BUF);
     if (!buf) { fprintf(stderr, "sirin_net: malloc failed\n"); exit(1); }
-    int n = (int)recv(s->fd, buf, SIRIN_TCP_READ_BUF - 1, 0);
-    if (n < 0) { fprintf(stderr, "sirin_net: recv() failed\n"); exit(1); }
-    buf[n] = '\0';
+    int n;
+    for (;;) {
+        n = (int)recv(s->fd, buf, SIRIN_TCP_READ_BUF - 1, 0);
+        if (n >= 0) break;
+        if (SIRIN_WOULD_BLOCK()) { sirin_yield(); continue; }
+        fprintf(stderr, "sirin_net: recv() failed\n"); exit(1);
+    }
+    buf[n] = '\0';  /* n == 0 → peer closed; returns "" */
     return buf;
 }
 
@@ -101,7 +122,11 @@ void sirin_tcp_stream_write(SirinTcpStream* s, const char* data) {
     size_t sent  = 0;
     while (sent < total) {
         int n = (int)send(s->fd, data + sent, (int)(total - sent), 0);
-        if (n <= 0) { fprintf(stderr, "sirin_net: send() failed\n"); exit(1); }
+        if (n < 0) {
+            if (SIRIN_WOULD_BLOCK()) { sirin_yield(); continue; }
+            return;  /* broken pipe / closed peer — drop, non-fatal */
+        }
+        if (n == 0) return;
         sent += (size_t)n;
     }
 }
