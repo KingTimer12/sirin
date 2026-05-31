@@ -4,7 +4,7 @@ use sirin_diagnostics::report_error;
 use sirin_parser::{
     expr::{BinOp, Expr},
     span::Spanned,
-    stmt::{ImplTarget, Stmt},
+    stmt::{BindPattern, ImplTarget, Stmt},
     types::Type,
 };
 
@@ -153,6 +153,33 @@ impl<'a> Checker<'a> {
     /// (struct/array/collection/object) or returned, the original binding loses
     /// ownership. Copy types (ints/bool/float) are exempt. Call AFTER type-checking
     /// the expression so use-after-move on the value itself is still caught.
+    /// Assignability: is a value of type `got` accepted where `decl` is expected?
+    /// Centralizes integer-width widening, collection element widening, Named name
+    /// matching, Void-cascade suppression, and Option (`T?`) compatibility — where
+    /// `None` carries inner `Void` and unifies with any `T?`.
+    fn type_compatible(decl: &Type, got: &Type) -> bool {
+        if *got == Type::Void || *decl == *got {
+            return true;
+        }
+        if decl.is_integer() && got.is_integer() {
+            return true;
+        }
+        match (decl, got) {
+            (Type::Array(d) | Type::Vec(d), Type::Array(g) | Type::Vec(g)) => {
+                d.is_integer() && g.is_integer()
+            }
+            (Type::Set(d), Type::Set(g)) => d.is_integer() && g.is_integer(),
+            (Type::Named(a), Type::Named(b)) => a == b,
+            (Type::Nullable(d), Type::Nullable(g)) => {
+                **d == Type::Void || **g == Type::Void || Self::type_compatible(d, g)
+            }
+            (Type::Try(d), Type::Try(g)) => {
+                **d == Type::Void || **g == Type::Void || Self::type_compatible(d, g)
+            }
+            _ => false,
+        }
+    }
+
     fn consume_var(&mut self, e: &Spanned<Expr<'a>>, to: &str) {
         if let Expr::Var(n) = &e.node {
             if let Some(ty) = self.env.get(n) {
@@ -169,23 +196,7 @@ impl<'a> Checker<'a> {
                 match self.check_expr(rhs) {
                     Ok(rhs_ty) => {
                         let env_ty = if let Some(decl) = declared {
-                            // int literals produce Type::Int; allow assign to any integer width.
-                            // array/vec literals produce Array(Int); allow Array(U8) etc.
-                            let coll_compat = match (&rhs_ty, decl) {
-                                (Type::Array(ri) | Type::Vec(ri),
-                                 Type::Array(di) | Type::Vec(di)) => {
-                                    ri.is_integer() && di.is_integer()
-                                }
-                                (Type::Set(ri), Type::Set(di)) => ri.is_integer() && di.is_integer(),
-                                _ => false,
-                            };
-                            let ok = rhs_ty == *decl
-                                || (decl.is_integer() && rhs_ty.is_integer())
-                                || rhs_ty == Type::Void
-                                || coll_compat
-                                // Named types: allow when names match
-                                || matches!((&rhs_ty, decl), (Type::Named(a), Type::Named(b)) if a == b);
-                            if !ok {
+                            if !Self::type_compatible(decl, &rhs_ty) {
                                 self.env.define(name.node, Type::Void);
                                 return Err(CheckerError::TypeError(decl.clone(), rhs_ty));
                             }
@@ -211,19 +222,7 @@ impl<'a> Checker<'a> {
                 match self.check_expr(rhs) {
                     Ok(rhs_ty) => {
                         let env_ty = if let Some(decl) = declared {
-                            let coll_compat = match (&rhs_ty, decl) {
-                                (Type::Array(ri) | Type::Vec(ri),
-                                 Type::Array(di) | Type::Vec(di)) => {
-                                    ri.is_integer() && di.is_integer()
-                                }
-                                (Type::Set(ri), Type::Set(di)) => ri.is_integer() && di.is_integer(),
-                                _ => false,
-                            };
-                            let ok = rhs_ty == *decl
-                                || (decl.is_integer() && rhs_ty.is_integer())
-                                || rhs_ty == Type::Void
-                                || coll_compat;
-                            if !ok {
+                            if !Self::type_compatible(decl, &rhs_ty) {
                                 self.env.define(name.node, Type::Void);
                                 return Err(CheckerError::TypeError(decl.clone(), rhs_ty));
                             }
@@ -289,6 +288,79 @@ impl<'a> Checker<'a> {
 
                 Ok(())
             }
+            Stmt::IfLet { pattern, name, expr, then, else_ } => {
+                let scrutinee = self.check_expr(expr)?;
+                // Resolve the bound name's type from the pattern + scrutinee shape.
+                let inner = match (pattern, &scrutinee) {
+                    (BindPattern::Some, Type::Nullable(i)) => (**i).clone(),
+                    (BindPattern::Ok, Type::Try(i)) => (**i).clone(),
+                    (BindPattern::Err, Type::Try(_)) => Type::Str, // error is always str
+                    (_, Type::Void) => Type::Void,                 // cascade
+                    _ => {
+                        let (need, want) = match pattern {
+                            BindPattern::Some => ("an optional (`T?`)", Type::Nullable(Box::new(Type::Void))),
+                            _ => ("a fallible result (`T!`)", Type::Try(Box::new(Type::Void))),
+                        };
+                        report_error(
+                            &expr.span.file, self.src, &expr.span,
+                            "wrong pattern scrutinee",
+                            &format!("`if {:?}(..) = ..` needs {}; found `{:?}`", pattern, need, scrutinee),
+                        );
+                        return Err(CheckerError::TypeError(want, scrutinee));
+                    }
+                };
+
+                self.env.push_scope();
+                self.env.define(name.node, inner);
+                for stmt in then {
+                    self.check_stmt(stmt)?;
+                }
+                self.env.pop_scope();
+
+                if let Some(else_stmts) = else_ {
+                    self.env.push_scope();
+                    for stmt in else_stmts {
+                        self.check_stmt(stmt)?;
+                    }
+                    self.env.pop_scope();
+                }
+
+                Ok(())
+            }
+            Stmt::TryAssign { name, rhs } => {
+                let rhs_ty = self.check_expr(rhs)?;
+                let inner = match rhs_ty {
+                    Type::Try(i) => *i,
+                    Type::Void => Type::Void, // cascade
+                    other => {
+                        report_error(
+                            &rhs.span.file, self.src, &rhs.span,
+                            "`?=` needs a fallible result",
+                            &format!("right side of `?=` must be a `T!` value; found `{:?}`", other),
+                        );
+                        return Err(CheckerError::TypeError(
+                            Type::Try(Box::new(Type::Void)),
+                            other,
+                        ));
+                    }
+                };
+                // Propagation requires the enclosing fn to also return a `T!`.
+                match self.env.get_return() {
+                    Some(Type::Try(_)) => {}
+                    _ => {
+                        report_error(
+                            &rhs.span.file, self.src, &rhs.span,
+                            "`?=` outside a fallible fn",
+                            "`?=` propagates `Err`, so the enclosing function must return a `T!`",
+                        );
+                        return Err(CheckerError::GenericError(
+                            "`?=` used in a function that does not return a `T!`".to_string(),
+                        ));
+                    }
+                }
+                self.env.define(name.node, inner);
+                Ok(())
+            }
             Stmt::Return { value, cond } => {
                 if let Some(cond_expr) = cond {
                     let cond_ty = self.check_expr(cond_expr)?;
@@ -309,7 +381,7 @@ impl<'a> Checker<'a> {
                 match self.env.get_return() {
                     None => Err(CheckerError::ReturnOutsideFn),
                     Some(expected) => {
-                        if return_ty != expected {
+                        if !Self::type_compatible(&expected, &return_ty) {
                             Err(CheckerError::TypeError(expected, return_ty))
                         } else {
                             Ok(())
@@ -939,6 +1011,24 @@ impl<'a> Checker<'a> {
                             _ => Ok(Type::Void),
                         }
                     }
+                    // Option methods: `opt.unwrap()`, `opt.unwrap_or(d)`, predicates
+                    Type::Nullable(inner) => {
+                        for arg in args { self.check_expr(arg)?; }
+                        match *method {
+                            "unwrap" | "unwrap_or" => Ok((**inner).clone()),
+                            "is_some" | "is_none"  => Ok(Type::Bool),
+                            _ => Ok(Type::Void),
+                        }
+                    }
+                    // Try methods: `r.unwrap()`, `r.unwrap_or(d)`, predicates
+                    Type::Try(inner) => {
+                        for arg in args { self.check_expr(arg)?; }
+                        match *method {
+                            "unwrap" | "unwrap_or" => Ok((**inner).clone()),
+                            "is_ok" | "is_err"     => Ok(Type::Bool),
+                            _ => Ok(Type::Void),
+                        }
+                    }
                     // User-defined class method calls
                     Type::Named(cls) => {
                         for arg in args { self.check_expr(arg)?; }
@@ -1027,6 +1117,36 @@ impl<'a> Checker<'a> {
                 tys.sort_by(|a, b| a.0.cmp(&b.0));
                 Ok(Type::Struct(tys))
             }
+            // `Some(v)` wraps a value; the inner moves into the option (aggregation).
+            Expr::Some(inner) => {
+                let t = self.check_expr(inner)?;
+                self.consume_var(inner, "Some(...)");
+                Ok(Type::Nullable(Box::new(t)))
+            }
+            // `None` is an optional of unknown inner type; unified against the
+            // expected `T?` by `type_compatible` (inner Void = wildcard).
+            Expr::None => Ok(Type::Nullable(Box::new(Type::Void))),
+            // `Ok(v)` carries the success value; `Err(msg)` carries a str message.
+            Expr::Ok(inner) => {
+                let t = self.check_expr(inner)?;
+                self.consume_var(inner, "Ok(...)");
+                Ok(Type::Try(Box::new(t)))
+            }
+            Expr::Err(inner) => {
+                let t = self.check_expr(inner)?;
+                if t != Type::Void && t != Type::Str {
+                    report_error(
+                        &inner.span.file, self.src, &inner.span,
+                        "error must be a string",
+                        &format!("`Err(..)` takes a `str` message; found `{:?}`", t),
+                    );
+                    return Err(CheckerError::TypeError(Type::Str, t));
+                }
+                // Value type unknown here; `type_compatible` unifies the Void wildcard.
+                Ok(Type::Try(Box::new(Type::Void)))
+            }
+            // `a::clone` yields an owned copy of `a` without consuming it; same type.
+            Expr::Clone(inner) => self.check_expr(inner),
         }
     }
 }

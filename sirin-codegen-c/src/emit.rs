@@ -5,7 +5,7 @@ use std::hash::Hasher;
 use sirin_parser::{
     expr::{BinOp, Expr},
     span::Spanned,
-    stmt::{ImplTarget, Stmt},
+    stmt::{BindPattern, ImplTarget, Stmt},
     types::Type,
 };
 
@@ -16,6 +16,9 @@ pub struct Emitter {
     fns: HashMap<String, Type>,
     current_fn: Option<String>,
     current_fn_params: Vec<String>,
+    /// return type of the function whose body is currently being emitted — used to
+    /// type `Ok`/`Err` literals and the `?=` Err-propagation `return`.
+    current_ret: Option<Type>,
     current_class: Option<String>,
     /// constructor context: field_name → full C lhs ("self.nome" | "self.base.nome")
     class_field_paths: HashMap<String, String>,
@@ -190,6 +193,23 @@ fn to_snake_case(s: &str) -> String {
 }
 
 /// Like collection_suffix but handles Type::Named by deriving Pascal/snake from the class name.
+/// Unique, C-identifier-safe suffix for a type — used to monomorphize `Try[T]`
+/// without collisions (`Try[int]` → `int`, `Try[int?]` → `opt_int`).
+fn type_mangle(ty: &Type) -> String {
+    match ty {
+        Type::Nullable(t) => format!("opt_{}", type_mangle(t)),
+        Type::Try(t)      => format!("try_{}", type_mangle(t)),
+        Type::Vec(t)      => format!("vec_{}", type_mangle(t)),
+        Type::Array(t)    => format!("arr_{}", type_mangle(t)),
+        Type::Set(t)      => format!("set_{}", type_mangle(t)),
+        Type::Map(k, v)   => format!("map_{}_{}", type_mangle(k), type_mangle(v)),
+        Type::Channel(t)  => format!("chan_{}", type_mangle(t)),
+        Type::Named(n)    => to_snake_case(n),
+        Type::Void        => "void".to_string(),
+        _                 => collection_suffix(ty).1.to_string(), // primitives
+    }
+}
+
 fn collection_suffix_for(ty: &Type) -> (String, String) {
     if let Type::Named(name) = ty {
         return (name.clone(), to_snake_case(name));
@@ -372,6 +392,7 @@ impl Emitter {
             fns: HashMap::new(),
             current_fn: None,
             current_fn_params: Vec::new(),
+            current_ret: None,
             current_class: None,
             class_field_paths: HashMap::new(),
             method_field_paths: HashMap::new(),
@@ -406,6 +427,7 @@ impl Emitter {
             fns: self.fns.clone(),
             current_fn: None,
             current_fn_params: Vec::new(),
+            current_ret: None,
             current_class: None,
             class_field_paths: HashMap::new(),
             method_field_paths: HashMap::new(),
@@ -526,6 +548,9 @@ fn collect_expr_vars<'a>(expr: &Expr<'a>, out: &mut std::collections::HashSet<St
         Expr::NewFields(_, fields) | Expr::ObjectLiteral(fields) => {
             for (_, v) in fields { collect_expr_vars(&v.node, out); }
         }
+        Expr::Some(inner) | Expr::Ok(inner) | Expr::Err(inner) | Expr::Clone(inner) => {
+            collect_expr_vars(&inner.node, out)
+        }
         _ => {}
     }
 }
@@ -545,6 +570,14 @@ fn collect_stmt_vars<'a>(stmt: &Stmt<'a>, out: &mut std::collections::HashSet<St
                 for s in els { collect_stmt_vars(&s.node, out); }
             }
         }
+        Stmt::IfLet { expr, then, else_, .. } => {
+            collect_expr_vars(&expr.node, out);
+            for s in then { collect_stmt_vars(&s.node, out); }
+            if let Some(els) = else_ {
+                for s in els { collect_stmt_vars(&s.node, out); }
+            }
+        }
+        Stmt::TryAssign { rhs, .. } => collect_expr_vars(&rhs.node, out),
         Stmt::Fn { body, .. } => {
             for s in body { collect_stmt_vars(&s.node, out); }
         }
@@ -588,6 +621,13 @@ fn collect_escaped_expr<'a>(e: &Expr<'a>, out: &mut HashSet<String>) {
             for a in args { collect_escaped_expr(&a.node, out); }
         }
         Expr::Call(_, args) => { for a in args { collect_escaped_expr(&a.node, out); } }
+        // `Some(v)`/`Ok(v)`/`Err(v)` move v into the boxed/tagged value.
+        Expr::Some(inner) | Expr::Ok(inner) | Expr::Err(inner) => {
+            mark(out, &inner.node);
+            collect_escaped_expr(&inner.node, out);
+        }
+        // `a::clone` reads a and makes a fresh copy — a is NOT moved.
+        Expr::Clone(inner) => collect_escaped_expr(&inner.node, out),
         Expr::BinOp(_, l, r) => { collect_escaped_expr(&l.node, out); collect_escaped_expr(&r.node, out); }
         Expr::Neg(x) | Expr::Not(x) | Expr::Await(x) => collect_escaped_expr(&x.node, out),
         Expr::Index(b, i) => { collect_escaped_expr(&b.node, out); collect_escaped_expr(&i.node, out); }
@@ -617,6 +657,12 @@ fn collect_escaped_stmt<'a>(s: &Stmt<'a>, out: &mut HashSet<String>) {
             for st in then { collect_escaped_stmt(&st.node, out); }
             if let Some(e) = else_ { for st in e { collect_escaped_stmt(&st.node, out); } }
         }
+        Stmt::IfLet { expr, then, else_, .. } => {
+            collect_escaped_expr(&expr.node, out);
+            for st in then { collect_escaped_stmt(&st.node, out); }
+            if let Some(e) = else_ { for st in e { collect_escaped_stmt(&st.node, out); } }
+        }
+        Stmt::TryAssign { rhs, .. } => collect_escaped_expr(&rhs.node, out),
         // A coroutine may outlive the spawning scope and aliases captured values,
         // so conservatively treat every var it references as escaped (never free).
         Stmt::Spawn { body } => {
@@ -647,6 +693,9 @@ fn expr_has_await(expr: &Expr<'_>) -> bool {
         Expr::Index(b, i) => expr_has_await(&b.node) || expr_has_await(&i.node),
         Expr::Array(items) => items.iter().any(|i| expr_has_await(&i.node)),
         Expr::Call(_, args) => args.iter().any(|a| expr_has_await(&a.node)),
+        Expr::Some(inner) | Expr::Ok(inner) | Expr::Err(inner) | Expr::Clone(inner) => {
+            expr_has_await(&inner.node)
+        }
         _ => false,
     }
 }
@@ -868,7 +917,10 @@ impl Emitter {
                     }
                 }
 
-                let mut value = self.emit_expr(&rhs.node);
+                // `Ok`/`Err` typed against the declared `T!` so the C struct matches.
+                let mut value = self
+                    .emit_try_ctor(ty, &rhs.node)
+                    .unwrap_or_else(|| self.emit_expr(&rhs.node));
                 // `:=` is a real deep copy. For strings, clone the buffer so the new
                 // binding owns its own memory (otherwise free would double-free).
                 if matches!(stmt, Stmt::CopyLet { .. }) && matches!(ty, Type::Str) {
@@ -917,7 +969,7 @@ impl Emitter {
                     match (cond, value) {
                         (Some(c), Some(v)) => {
                             let cond_str = self.emit_expr(&c.node);
-                            let val_str = self.emit_expr(&v.node);
+                            let val_str = self.emit_ret_value(&v.node);
                             self.output.push_str(&format!(
                                 "{}if ({}) return {};\n",
                                 self.indent(),
@@ -934,7 +986,7 @@ impl Emitter {
                             ));
                         }
                         (None, Some(v)) => {
-                            let val_str = self.emit_expr(&v.node);
+                            let val_str = self.emit_ret_value(&v.node);
                             self.output
                                 .push_str(&format!("{}return {};\n", self.indent(), val_str));
                         }
@@ -971,7 +1023,7 @@ impl Emitter {
 
                 let ret_ty = return_type.clone().unwrap_or(Type::Void);
                 let ret = self.type_to_c(&ret_ty);
-                self.fns.insert(fn_name.to_string(), ret_ty);
+                self.fns.insert(fn_name.to_string(), ret_ty.clone());
 
                 let params = args
                     .iter()
@@ -996,6 +1048,7 @@ impl Emitter {
                 let outer_vars = self.vars.clone();
                 let outer_fn = self.current_fn.take();
                 let outer_params = std::mem::take(&mut self.current_fn_params);
+                let outer_ret = self.current_ret.replace(ret_ty.clone());
 
                 if tco {
                     self.output.push_str(&format!("{}inicio:\n", self.indent()));
@@ -1021,6 +1074,7 @@ impl Emitter {
                 self.vars = outer_vars;
                 self.current_fn = outer_fn;
                 self.current_fn_params = outer_params;
+                self.current_ret = outer_ret;
                 self.depth -= 1;
 
                 self.output.push_str(&format!("{}}}\n", self.indent()));
@@ -1057,6 +1111,96 @@ impl Emitter {
                 }
 
                 self.output.push_str(&format!("{}}}\n", self.indent()));
+            }
+            Stmt::IfLet { pattern, name, expr, then, else_ } => {
+                // `Some` → NULL-check a pointer; `Ok`/`Err` → check the Try tag.
+                let scrut_ty = self.get_expr(&expr.node);
+                let scrut_cty = self.type_to_c(&scrut_ty);
+                if expr_has_await(&expr.node) {
+                    self.output.push_str(&format!("{}sirin_yield();\n", self.indent()));
+                }
+                let val = self.emit_expr(&expr.node);
+                let id = self.spawn_count;
+                self.spawn_count += 1;
+                let tmp = format!("__pat{}", id);
+                self.output.push_str(&format!(
+                    "{}{} {} = {};\n", self.indent(), scrut_cty, tmp, val));
+
+                // (condition, bound-name type, how to read the payload from `tmp`)
+                let (cond, bind_ty, payload) = match pattern {
+                    BindPattern::Some => {
+                        let inner = match &scrut_ty {
+                            Type::Nullable(i) => (**i).clone(),
+                            _ => Type::Int,
+                        };
+                        (format!("{} != NULL", tmp), inner, format!("*{}", tmp))
+                    }
+                    BindPattern::Ok => {
+                        let inner = match &scrut_ty {
+                            Type::Try(i) => (**i).clone(),
+                            _ => Type::Int,
+                        };
+                        (format!("{}.ok", tmp), inner, format!("{}.value", tmp))
+                    }
+                    BindPattern::Err => {
+                        (format!("!{}.ok", tmp), Type::Str, format!("{}.err", tmp))
+                    }
+                };
+                let bind_cty = self.type_to_c(&bind_ty);
+                self.output.push_str(&format!("{}if ({}) {{\n", self.indent(), cond));
+
+                self.depth += 1;
+                self.output.push_str(&format!(
+                    "{}{} {} = {};\n", self.indent(), bind_cty, name.node, payload));
+                self.vars.insert(name.node.to_string(), bind_ty);
+                for s in then {
+                    self.emit_stmt(&s.node);
+                }
+                self.depth -= 1;
+
+                if let Some(else_body) = else_ {
+                    self.output.push_str(&format!("{}}} else {{\n", self.indent()));
+                    self.depth += 1;
+                    for s in else_body {
+                        self.emit_stmt(&s.node);
+                    }
+                    self.depth -= 1;
+                }
+
+                self.output.push_str(&format!("{}}}\n", self.indent()));
+            }
+            Stmt::TryAssign { name, rhs } => {
+                // `name ?= f()` → eval Try; on Err, propagate via the current fn's Try
+                // return; otherwise bind the Ok payload.
+                let rhs_ty = self.get_expr(&rhs.node);
+                let inner_ty = match &rhs_ty {
+                    Type::Try(i) => (**i).clone(),
+                    _ => Type::Void,
+                };
+                let try_cty = self.type_to_c(&rhs_ty);
+                let inner_cty = self.type_to_c(&inner_ty);
+                if expr_has_await(&rhs.node) {
+                    self.output.push_str(&format!("{}sirin_yield();\n", self.indent()));
+                }
+                let val = self.emit_expr(&rhs.node);
+                let id = self.spawn_count;
+                self.spawn_count += 1;
+                let tmp = format!("__try{}", id);
+                self.output.push_str(&format!(
+                    "{}{} {} = {};\n", self.indent(), try_cty, tmp, val));
+
+                // Build the propagated Err of the current fn's return type.
+                let ret_cty = self
+                    .current_ret
+                    .as_ref()
+                    .map(|t| self.type_to_c(t))
+                    .unwrap_or_else(|| try_cty.clone());
+                self.output.push_str(&format!(
+                    "{}if (!{}.ok) return ({}){{ .ok = 0, .err = {}.err }};\n",
+                    self.indent(), tmp, ret_cty, tmp));
+                self.output.push_str(&format!(
+                    "{}{} {} = {}.value;\n", self.indent(), inner_cty, name.node, tmp));
+                self.vars.insert(name.node.to_string(), inner_ty);
             }
             Stmt::Expr(expr) => {
                 // async fn call.await → auto-spawn the fn as a coroutine
@@ -1591,6 +1735,28 @@ impl Emitter {
                             }
                         }
                     }
+                    Type::Nullable(inner) => {
+                        let cty = format!("{}*", self.type_to_c(&inner));
+                        match *method {
+                            "unwrap" => format!(
+                                "({{ {cty} __u = ({obj_str}); if (__u == NULL) {{ fprintf(stderr, \"sirin: unwrap on None\\n\"); exit(1); }} *__u; }})"),
+                            "unwrap_or" => format!("({{ {cty} __u = ({obj_str}); __u ? *__u : ({args_str}); }})"),
+                            "is_some" => format!("(({obj_str}) != NULL)"),
+                            "is_none" => format!("(({obj_str}) == NULL)"),
+                            _ => obj_str.clone(),
+                        }
+                    }
+                    Type::Try(inner) => {
+                        let tname = self.type_to_c(&Type::Try(inner));
+                        match *method {
+                            "unwrap" => format!(
+                                "({{ {tname} __u = ({obj_str}); if (!__u.ok) {{ fprintf(stderr, \"sirin: unwrap on Err: %s\\n\", __u.err); exit(1); }} __u.value; }})"),
+                            "unwrap_or" => format!("({{ {tname} __u = ({obj_str}); __u.ok ? __u.value : ({args_str}); }})"),
+                            "is_ok"  => format!("(({obj_str}).ok)"),
+                            "is_err" => format!("(!({obj_str}).ok)"),
+                            _ => obj_str.clone(),
+                        }
+                    }
                     _ => {
                         // Check primitive impl methods registered via `impl T`
                         let prefix = match &obj_ty {
@@ -1660,6 +1826,38 @@ impl Emitter {
                     .collect::<Vec<_>>().join(", ");
                 format!("({}){{ {} }}", cty, inits)
             }
+            // Option uses a pointer: `Some(v)` heap-boxes the value, `None` is NULL.
+            Expr::Some(inner) => {
+                let inner_ty = self.get_expr(&inner.node);
+                let cty = self.type_to_c(&inner_ty);
+                let val = self.emit_expr(&inner.node);
+                format!("({{ {cty}* __sv = malloc(sizeof({cty})); *__sv = ({val}); __sv; }})")
+            }
+            Expr::None => "NULL".to_string(),
+            // `Ok(v)` self-types from v. `Err(msg)` has unknown value type here, so it
+            // lowers to the `void`-payload Try; `return`/typed-let re-emit it with the
+            // proper target type (see emit_try_ctor).
+            Expr::Ok(inner) => {
+                let inner_ty = self.get_expr(&inner.node);
+                let tname = self.type_to_c(&Type::Try(Box::new(inner_ty)));
+                let v = self.emit_expr(&inner.node);
+                format!("({tname}){{ .ok = 1, .value = ({v}) }}")
+            }
+            Expr::Err(inner) => {
+                let tname = self.type_to_c(&Type::Try(Box::new(Type::Void)));
+                let m = self.emit_expr(&inner.node);
+                format!("({tname}){{ .ok = 0, .err = ({m}) }}")
+            }
+            // `a::clone` — deep copy. Strings get their own buffer; copy types and
+            // (for now) collections/structs pass through (matches `:=` semantics).
+            Expr::Clone(inner) => {
+                let v = self.emit_expr(&inner.node);
+                if matches!(self.get_expr(&inner.node), Type::Str) {
+                    format!("sirin_str_clone({})", v)
+                } else {
+                    v
+                }
+            }
             Expr::Neg(expr) => format!("(-{})", self.emit_expr(&expr.node)),
             Expr::Not(expr) => format!("(!{})", self.emit_expr(&expr.node)),
             Expr::BinOp(op, lhs, rhs) => {
@@ -1692,6 +1890,37 @@ impl Emitter {
         }
     }
 
+    /// Emit an `Ok(v)`/`Err(m)` literal with an explicit target `Try[T]` type so the
+    /// C struct type matches the binding/return (needed for `Err`, whose value type is
+    /// unknown from the expression alone). Returns None if not an Ok/Err on a Try target.
+    fn emit_try_ctor(&self, target: &Type, e: &Expr<'_>) -> Option<String> {
+        if !matches!(target, Type::Try(_)) {
+            return None;
+        }
+        let tname = self.type_to_c(target);
+        match e {
+            Expr::Ok(v) => {
+                let vs = self.emit_expr(&v.node);
+                Some(format!("({tname}){{ .ok = 1, .value = ({vs}) }}"))
+            }
+            Expr::Err(m) => {
+                let ms = self.emit_expr(&m.node);
+                Some(format!("({tname}){{ .ok = 0, .err = ({ms}) }}"))
+            }
+            _ => None,
+        }
+    }
+
+    /// Emit a return/let value, typing `Ok`/`Err` against the current return type.
+    fn emit_ret_value(&self, v: &Expr<'_>) -> String {
+        if let Some(rt) = &self.current_ret {
+            if let Some(s) = self.emit_try_ctor(rt, v) {
+                return s;
+            }
+        }
+        self.emit_expr(v)
+    }
+
     fn type_to_c(&self, ty: &Type) -> String {
         let name = match ty {
             Type::Int | Type::I64 => "int64_t".to_string(),
@@ -1707,6 +1936,12 @@ impl Emitter {
             Type::Bool => "int".to_string(),
             Type::Void => "void".to_string(),
             Type::Nullable(inner) => format!("{}*", self.type_to_c(inner)),
+            Type::Try(inner) => {
+                let mangle = type_mangle(inner);
+                let cinner = self.type_to_c(inner);
+                self.register_try_type(&mangle, &cinner);
+                format!("SirinTry_{mangle}")
+            }
             Type::Vec(inner) => {
                 let (pascal, snake) = collection_suffix_for(inner);
                 if let Type::Named(_) = inner.as_ref() {
@@ -1847,6 +2082,16 @@ impl Emitter {
                         "split" => Type::Vec(Box::new(Type::Str)),
                         _ => Type::Void,
                     },
+                    Type::Nullable(inner) => match *method {
+                        "unwrap" | "unwrap_or" => (**inner).clone(),
+                        "is_some" | "is_none"  => Type::Bool,
+                        _ => Type::Void,
+                    },
+                    Type::Try(inner) => match *method {
+                        "unwrap" | "unwrap_or" => (**inner).clone(),
+                        "is_ok" | "is_err"     => Type::Bool,
+                        _ => Type::Void,
+                    },
                     Type::Named(cls) => {
                         // Net static constructor
                         if matches!(&obj.node, Expr::NewDefault("TcpStream") | Expr::Var("TcpStream")) && *method == "connect" {
@@ -1911,6 +2156,11 @@ impl Emitter {
                 tys.sort_by(|a, b| a.0.cmp(&b.0));
                 Type::Struct(tys)
             }
+            Expr::Some(inner) => Type::Nullable(Box::new(self.get_expr(&inner.node))),
+            Expr::None => Type::Nullable(Box::new(Type::Void)),
+            Expr::Ok(inner) => Type::Try(Box::new(self.get_expr(&inner.node))),
+            Expr::Err(_) => Type::Try(Box::new(Type::Void)),
+            Expr::Clone(inner) => self.get_expr(&inner.node),
         }
     }
 
@@ -2072,6 +2322,8 @@ impl Emitter {
         }
         match rhs {
             Expr::Call(n, _) if *n == "readln" => true,
+            // `x = a::clone` on a string allocates a fresh owned buffer.
+            Expr::Clone(inner) => matches!(self.get_expr(&inner.node), Type::Str),
             Expr::MethodCall(obj, m, _) =>
                 matches!(self.get_expr(&obj.node), Type::Str)
                     && matches!(*m, "to_upper" | "to_lower" | "slice" | "trim" | "replace" | "char_at"),
@@ -2104,6 +2356,22 @@ impl Emitter {
                 }
             }
         }
+    }
+
+    /// Register the monomorphized `Try[T]` tagged struct: `{ ok, value, err }`.
+    fn register_try_type(&self, snake: &str, c_inner: &str) {
+        let key = format!("Try_{snake}");
+        if self.named_collection_decls.borrow().contains_key(&key) { return; }
+        // `void` inner (from a bare `Err` placeholder) has no value field.
+        let value_field = if c_inner == "void" {
+            String::new()
+        } else {
+            format!("    {c_inner} value;\n")
+        };
+        let decl = format!(
+            "typedef struct {{\n    int ok;\n{value_field}    const char* err;\n}} SirinTry_{snake};\n"
+        );
+        self.named_collection_decls.borrow_mut().insert(key, decl);
     }
 
     /// Register a synthetic typedef for an anonymous object-literal struct.

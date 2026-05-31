@@ -21,6 +21,14 @@ pub enum Expr<'a> {
     NewFields(&'a str, Vec<(&'a str, Spanned<Expr<'a>>)>),
     // anonymous object literal: { nome: "Julius", idade: 24 }
     ObjectLiteral(Vec<(&'a str, Spanned<Expr<'a>>)>),
+    // Option constructors (replace null/undefined): `Some(v)` and `None`
+    Some(Box<Spanned<Expr<'a>>>),
+    None,
+    // Try/Result constructors: `Ok(v)` and `Err(msg)`
+    Ok(Box<Spanned<Expr<'a>>>),
+    Err(Box<Spanned<Expr<'a>>>),
+    // inline deep copy: `a::clone` — owns a fresh value without consuming `a`
+    Clone(Box<Spanned<Expr<'a>>>),
 }
 
 #[derive(Debug, Clone)]

@@ -5,6 +5,9 @@ use crate::{error::LexingError, span::SpannedToken};
 
 #[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(error(LexingError, LexingError::from_lexer))]
+// Comments are skipped at lex time (never reach the parser): `// line` and `/* block */`.
+#[logos(skip("//[^\n]*", allow_greedy = true))]
+#[logos(skip r"/\*([^*]|\*+[^*/])*\*+/")]
 pub enum Tokens<'a> {
     #[regex(r"[ \t\n]+")]
     Whitespace,
@@ -26,6 +29,26 @@ pub enum Tokens<'a> {
     Or,
     #[token("!")]
     Not,
+
+    // Option (replaces null/undefined): `Some(x)` / `None`, type `T?`
+    #[token("Some")]
+    Some,
+    #[token("None")]
+    None,
+    #[token("?")]
+    Question,
+
+    // Try/Result (fallible ops): `Ok(v)` / `Err(msg)`, type `T!`, `x ?= f()`, `f::try()`
+    #[token("Ok")]
+    Ok,
+    #[token("Err")]
+    Err,
+    #[token("try")]
+    Try,
+    #[token("?=")]
+    QuestionAssign,
+    #[token("::")]
+    ColonColon,
 
     // Op
     #[token("==")]

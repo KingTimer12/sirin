@@ -7,6 +7,8 @@ pub enum Type {
     Bool,
     Void,
     Nullable(Box<Type>),
+    // fallible result `T!` — Ok(T) | Err(str); error type fixed to str for now
+    Try(Box<Type>),
     // explicit integer widths
     U8,
     U16,

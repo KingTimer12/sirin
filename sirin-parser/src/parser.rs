@@ -15,7 +15,7 @@ use sirin_lexer::token::Tokens;
 use crate::{
     expr::{BinOp, Expr},
     span::Spanned,
-    stmt::{ClassField, ImplTarget, InterfaceMethod, Stmt},
+    stmt::{BindPattern, ClassField, ImplTarget, InterfaceMethod, Stmt},
     types::Type,
 };
 
@@ -91,29 +91,61 @@ pub fn parser<'a>()
         })
         .boxed();
 
-    // Boxed: used in arg and return-type positions; stops type from infecting stmt chain
-    // Named added as fallback for user-defined class types (any remaining Ident)
-    let ty = choice((
-        struct_ty,
-        just(Tokens::ArrayType)
-            .ignore_then(bracket.clone())
-            .map(|t| Type::Array(Box::new(t))),
-        just(Tokens::VecType)
-            .ignore_then(bracket.clone())
-            .map(|t| Type::Vec(Box::new(t))),
-        just(Tokens::SetType)
-            .ignore_then(bracket.clone())
-            .map(|t| Type::Set(Box::new(t))),
-        just(Tokens::MapType)
-            .ignore_then(map_bracket)
-            .map(|(k, v)| Type::Map(Box::new(k), Box::new(v))),
-        // Channel[T] — matched before Named to avoid "Channel" falling through
-        select! { Tokens::Ident("Channel") => () }
-            .ignore_then(bracket.clone())
-            .map(|t| Type::Channel(Box::new(t))),
-        ty_atom,
-        ident_name.clone().map(|n: &str| Type::Named(n.to_string())),
-    )).boxed();
+    // Type grammar. Recursive so the `Option[..]`/`Try[..]` long forms can nest
+    // arbitrarily (`Try[int?]`, `Option[Try[int]]`). Collection brackets stay shallow.
+    // Named is the fallback for user-defined class types (any remaining Ident).
+    let ty = recursive(|ty| {
+        // Recursive inner — used only by Option[..]/Try[..] so they accept any type.
+        let nest = ty
+            .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket))
+            .boxed();
+
+        let core = choice((
+            struct_ty,
+            just(Tokens::ArrayType)
+                .ignore_then(bracket.clone())
+                .map(|t| Type::Array(Box::new(t))),
+            just(Tokens::VecType)
+                .ignore_then(bracket.clone())
+                .map(|t| Type::Vec(Box::new(t))),
+            just(Tokens::SetType)
+                .ignore_then(bracket.clone())
+                .map(|t| Type::Set(Box::new(t))),
+            just(Tokens::MapType)
+                .ignore_then(map_bracket)
+                .map(|(k, v)| Type::Map(Box::new(k), Box::new(v))),
+            // Channel[T] — matched before Named to avoid "Channel" falling through
+            select! { Tokens::Ident("Channel") => () }
+                .ignore_then(bracket.clone())
+                .map(|t| Type::Channel(Box::new(t))),
+            // Long forms (aliases of `T?` / `T!`); recursive inner enables nesting.
+            select! { Tokens::Ident("Option") => () }
+                .ignore_then(nest.clone())
+                .map(|t| Type::Nullable(Box::new(t))),
+            select! { Tokens::Ident("Try") => () }
+                .ignore_then(nest.clone())
+                .map(|t| Type::Try(Box::new(t))),
+            ty_atom,
+            ident_name.clone().map(|n: &str| Type::Named(n.to_string())),
+        ))
+        .boxed();
+
+        // Postfix sigils: `T?` → Nullable, `T!` → Try. Single level — stacking
+        // (`int?!`) is a parse error; use the bracket long form to nest.
+        core.then(
+            choice((
+                just(Tokens::Question).to(0u8),
+                just(Tokens::Not).to(1u8),
+            ))
+            .or_not(),
+        )
+        .map(|(t, m)| match m {
+            Some(0) => Type::Nullable(Box::new(t)),
+            Some(1) => Type::Try(Box::new(t)),
+            _ => t,
+        })
+    })
+    .boxed();
 
     // Postfix ops collected per-token; stored with their span for correct tree spans
     enum Postfix<'b> {
@@ -121,6 +153,7 @@ pub fn parser<'a>()
         Field(&'b str, Span),
         Method(&'b str, Vec<Spanned<Expr<'b>>>, Span),
         Await(Span),
+        Clone(Span),
     }
 
     let expr = recursive(|p| {
@@ -223,6 +256,51 @@ pub fn parser<'a>()
                 .ignore_then(ctor_args())
                 .map_with(|a, e| Spanned::new(Expr::Call("Array", a), sp(e.span())));
 
+            // Option constructors: `Some(expr)` / `None` (dedicated tokens)
+            let some_expr = just(Tokens::Some)
+                .ignore_then(
+                    p.clone()
+                        .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+                )
+                .map_with(|inner, extra| {
+                    Spanned::new(Expr::Some(Box::new(inner)), sp(extra.span()))
+                });
+            let none_expr = just(Tokens::None)
+                .map_with(|_, extra| Spanned::new(Expr::None, sp(extra.span())));
+
+            // Try constructors: `Ok(expr)` / `Err(expr)`
+            let ok_expr = just(Tokens::Ok)
+                .ignore_then(
+                    p.clone()
+                        .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+                )
+                .map_with(|inner, extra| {
+                    Spanned::new(Expr::Ok(Box::new(inner)), sp(extra.span()))
+                });
+            let err_expr = just(Tokens::Err)
+                .ignore_then(
+                    p.clone()
+                        .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+                )
+                .map_with(|inner, extra| {
+                    Spanned::new(Expr::Err(Box::new(inner)), sp(extra.span()))
+                });
+
+            // `f::try(args)` — readable call form; a fallible fn returns Try[T] anyway,
+            // so this lowers to a plain call.
+            let try_call = ident_name
+                .then_ignore(just(Tokens::ColonColon))
+                .then_ignore(just(Tokens::Try))
+                .then(
+                    p.clone()
+                        .separated_by(just(Tokens::Comma))
+                        .collect::<Vec<_>>()
+                        .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+                )
+                .map_with(|(name, args), extra| {
+                    Spanned::new(Expr::Call(name, args), sp(extra.span()))
+                });
+
             // new_fields before call so Ident { } is tried before Ident ()
             array_lit
                 .or(parenthesized)
@@ -230,6 +308,11 @@ pub fn parser<'a>()
                 .or(float)
                 .or(string)
                 .or(boolean)
+                .or(some_expr)
+                .or(none_expr)
+                .or(ok_expr)
+                .or(err_expr)
+                .or(try_call)
                 .or(vec_ctor)
                 .or(map_ctor)
                 .or(set_ctor)
@@ -266,10 +349,16 @@ pub fn parser<'a>()
             .ignore_then(just(Tokens::Await))
             .map_with(|_, extra| Postfix::Await(sp(extra.span())));
 
+        // `expr::clone` — inline deep copy intrinsic (no args)
+        let postfix_clone = just(Tokens::ColonColon)
+            .ignore_then(select! { Tokens::Ident("clone") => () })
+            .map_with(|_, extra| Postfix::Clone(sp(extra.span())));
+
         let primary = atom
             .then(
                 postfix_index
                     .or(postfix_await)
+                    .or(postfix_clone)
                     .or(postfix_method)
                     .or(postfix_field)
                     .repeated()
@@ -288,6 +377,9 @@ pub fn parser<'a>()
                     }
                     Postfix::Await(span) => {
                         Spanned::new(Expr::Await(Box::new(acc)), span)
+                    }
+                    Postfix::Clone(span) => {
+                        Spanned::new(Expr::Clone(Box::new(acc)), span)
                     }
                 })
             })
@@ -423,6 +515,63 @@ pub fn parser<'a>()
                         value: value.map(Box::new),
                         cond: cond.map(Box::new),
                     },
+                    sp(extra.span()),
+                )
+            });
+
+        // `if Some(name) = expr { .. }` / `if Ok(x) = r { .. }` / `if Err(e) = r { .. }`
+        // Tried before `r#if`; unambiguous since it starts with a pattern keyword.
+        let bind_pat = choice((
+            just(Tokens::Some).to(BindPattern::Some),
+            just(Tokens::Ok).to(BindPattern::Ok),
+            just(Tokens::Err).to(BindPattern::Err),
+        ));
+        let if_let = just(Tokens::If)
+            .ignore_then(bind_pat)
+            .then(
+                spanned_name
+                    .clone()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+            )
+            .then_ignore(just(Tokens::Assign))
+            .then(expr.clone())
+            .then(
+                decl.clone()
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+            )
+            .then(
+                just(Tokens::Else)
+                    .ignore_then(
+                        decl.clone()
+                            .repeated()
+                            .collect::<Vec<_>>()
+                            .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+                    )
+                    .or_not(),
+            )
+            .map_with(|((((pattern, name), opt), then), else_), extra| {
+                Spanned::new(
+                    Stmt::IfLet {
+                        pattern,
+                        name,
+                        expr: Box::new(opt),
+                        then,
+                        else_,
+                    },
+                    sp(extra.span()),
+                )
+            });
+
+        // `name ?= fallible()` — bind Ok value or propagate Err from the current fn.
+        let try_assign = spanned_name
+            .clone()
+            .then_ignore(just(Tokens::QuestionAssign))
+            .then(expr.clone())
+            .map_with(|(name, rhs), extra| {
+                Spanned::new(
+                    Stmt::TryAssign { name, rhs: Box::new(rhs) },
                     sp(extra.span()),
                 )
             });
@@ -749,9 +898,11 @@ pub fn parser<'a>()
         // typed_* must precede untyped — both start with ident, disambiguated by ':' vs '='/'  :='
         typed_copy_var
             .or(typed_var)
+            .or(try_assign)
             .or(copy_var)
             .or(var)
             .or(r#return)
+            .or(if_let)
             .or(r#if)
             .or(r#fn)
             .or(spawn_stmt)

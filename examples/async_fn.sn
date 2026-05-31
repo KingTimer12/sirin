@@ -12,5 +12,5 @@ async fn consume(c: Channel[int]) {
     println(result)
 }
 
-spawn { produce(ch, 10) }
-spawn { consume(ch) }
+spawn produce(ch, 10)
+spawn consume(ch)

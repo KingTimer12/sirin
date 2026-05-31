@@ -1,5 +1,13 @@
 use crate::{expr::Expr, span::Spanned, types::Type};
 
+/// Which constructor an `if <Pat>(name) = expr` binding destructures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BindPattern {
+    Some, // Option `T?`
+    Ok,   // Try `T!` success
+    Err,  // Try `T!` failure (binds the error str)
+}
+
 #[derive(Debug, Clone)]
 pub enum ImplTarget<'a> {
     Named(&'a str),
@@ -62,6 +70,20 @@ pub enum Stmt<'a> {
         cond: Box<Spanned<Expr<'a>>>,
         then: Vec<Spanned<Stmt<'a>>>,
         else_: Option<Vec<Spanned<Stmt<'a>>>>,
+    },
+    // `if Some(name) = opt { .. }` / `if Ok(x) = r { .. }` / `if Err(e) = r { .. }`
+    // — binds the destructured value when the pattern matches.
+    IfLet {
+        pattern: BindPattern,
+        name: Spanned<&'a str>,
+        expr: Box<Spanned<Expr<'a>>>,
+        then: Vec<Spanned<Stmt<'a>>>,
+        else_: Option<Vec<Spanned<Stmt<'a>>>>,
+    },
+    // `name ?= fallible()` — bind the Ok value, or propagate Err from the current fn.
+    TryAssign {
+        name: Spanned<&'a str>,
+        rhs: Box<Spanned<Expr<'a>>>,
     },
     Expr(Spanned<Expr<'a>>),
     Class {

@@ -1,0 +1,31 @@
+use sirin.io
+
+fn parse(s: str) -> int! {
+    if (s.len() == 0) {
+        return Err("vazio")
+    }
+    return Ok(s.to_int())
+}
+
+fn somar(a: str, b: str) -> int! {
+    x ?= parse(a)
+    y ?= parse(b)
+    return Ok(x + y)
+}
+
+fn main() {
+    if Ok(v) = somar("2", "3") {
+        println(v)
+    } else {
+        println("erro no soma")
+    }
+
+    if Err(e) = somar("", "3") {
+        println(e)
+    }
+
+    r = parse::try("10")
+    if Ok(v) = r {
+        println(v)
+    }
+}

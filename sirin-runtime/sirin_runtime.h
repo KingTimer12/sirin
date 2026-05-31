@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h> /* malloc — used by Option `Some(..)` heap-boxing */
 
 /* ── SirinStr (always present) ────────────────────────────────────────────── */
 typedef struct {

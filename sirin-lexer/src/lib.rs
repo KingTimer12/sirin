@@ -19,6 +19,33 @@ mod tests {
             .collect()
     }
 
+    // --- comments (skipped at lex time) ---
+
+    #[test]
+    fn test_tokens_lexer_line_comment() {
+        // `//` runs to EOL; `/` alone stays a Divide.
+        let src = "a = 5 // ignore me\nb = a / 2";
+        let toks: Vec<Tokens> = tok_no_ws(src).into_iter().map(|t| t.node).collect();
+        assert_eq!(
+            toks,
+            vec![
+                Tokens::Ident("a"), Tokens::Assign, Tokens::Integer(5),
+                Tokens::Ident("b"), Tokens::Assign, Tokens::Ident("a"),
+                Tokens::Divide, Tokens::Integer(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tokens_lexer_block_comment() {
+        let src = "a /* mid\nline */ = 5";
+        let toks: Vec<Tokens> = tok_no_ws(src).into_iter().map(|t| t.node).collect();
+        assert_eq!(
+            toks,
+            vec![Tokens::Ident("a"), Tokens::Assign, Tokens::Integer(5)]
+        );
+    }
+
     // --- int / float literals ---
 
     #[test]

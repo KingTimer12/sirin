@@ -1,0 +1,35 @@
+use sirin.io
+
+fn achar(id: int) -> str? {
+    if (id == 1) {
+        return Some("Julius")
+    }
+    return None
+}
+
+fn main() {
+    nome = achar(1)
+    if Some(n) = nome {
+        println(n)
+    } else {
+        println("nada")
+    }
+
+    if Some(n) = achar(2) {
+        println(n)
+    } else {
+        println("nao achou id 2")
+    }
+
+    idade: int? = Some(24)
+    if Some(i) = idade {
+        println(i)
+    }
+
+    vazio: int? = None
+    if Some(i) = vazio {
+        println(i)
+    } else {
+        println("vazio")
+    }
+}

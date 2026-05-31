@@ -18,9 +18,5 @@ async fn consumer(c: Channel[int], n: int) {
     }
 }
 
-spawn {
-    producer(ch, 5)
-}
-spawn {
-    consumer(ch, 5)
-}
+spawn producer(ch, 5)
+spawn consumer(ch, 5)

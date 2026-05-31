@@ -1,0 +1,30 @@
+use sirin.io
+
+fn buscar(id: int) -> Try[int?] {
+    if (id < 0) { return Err("id invalido") }
+    if (id == 0) { return Ok(None) }
+    return Ok(Some(id * 10))
+}
+
+fn main() {
+    if Ok(o) = buscar(5) {
+        if Some(v) = o {
+            println(v)
+        } else {
+            println("ok mas vazio")
+        }
+    }
+
+    if Ok(o) = buscar(0) {
+        println(o.unwrap_or(-1))
+    }
+
+    if Err(e) = buscar(-1) {
+        println(e)
+    }
+
+    a: Option[int] = Some(7)
+    b: Try[int] = Ok(8)
+    println(a.unwrap())
+    println(b.unwrap())
+}
