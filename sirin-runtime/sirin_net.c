@@ -87,6 +87,23 @@ void sirin_tcp_listener_close(SirinTcpListener* l) {
     l->fd = -1;
 }
 
+/* Deep clone: duplicate the OS handle so each copy owns an independent fd. */
+SirinTcpListener sirin_tcp_listener_clone(SirinTcpListener* l) {
+    SirinTcpListener copy;
+#ifdef _WIN32
+    WSAPROTOCOL_INFO info;
+    WSADuplicateSocket((SOCKET)l->fd, GetCurrentProcessId(), &info);
+    copy.fd = (int)WSASocket(AF_INET, SOCK_STREAM, 0, &info, 0, WSA_FLAG_OVERLAPPED);
+#else
+    copy.fd = dup(l->fd);
+    if (copy.fd < 0) {
+        fprintf(stderr, "sirin_net: dup() failed in tcp_listener_clone\n");
+        exit(1);
+    }
+#endif
+    return copy;
+}
+
 /* ── TcpStream ── */
 
 SirinTcpStream sirin_tcp_stream_connect(const char* addr, int port) {
@@ -134,6 +151,23 @@ void sirin_tcp_stream_write(SirinTcpStream* s, const char* data) {
 void sirin_tcp_stream_close(SirinTcpStream* s) {
     SIRIN_SOCK_CLOSE(s->fd);
     s->fd = -1;
+}
+
+/* Deep clone: duplicate the OS handle so each copy owns an independent fd. */
+SirinTcpStream sirin_tcp_stream_clone(SirinTcpStream* s) {
+    SirinTcpStream copy;
+#ifdef _WIN32
+    WSAPROTOCOL_INFO info;
+    WSADuplicateSocket((SOCKET)s->fd, GetCurrentProcessId(), &info);
+    copy.fd = (int)WSASocket(AF_INET, SOCK_STREAM, 0, &info, 0, WSA_FLAG_OVERLAPPED);
+#else
+    copy.fd = dup(s->fd);
+    if (copy.fd < 0) {
+        fprintf(stderr, "sirin_net: dup() failed in tcp_stream_clone\n");
+        exit(1);
+    }
+#endif
+    return copy;
 }
 
 /* ── UdpSocket ── */

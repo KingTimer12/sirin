@@ -23,8 +23,7 @@ async fn handle_client(conn: TcpStream) {
 
 async fn accept_loop(l: TcpListener) {
     conn = l.accept().await
-    registro := conn
-    clients.push(registro)
+    clients.push(conn::clone)
     handle_client(conn).await
     return accept_loop(l)
 }

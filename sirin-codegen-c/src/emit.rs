@@ -54,6 +54,56 @@ pub struct Emitter {
     /// names of module-level (global) variables — emitted as file-scope C globals;
     /// assignments to these emit as `name = val` instead of redeclaring
     globals: HashSet<String>,
+    /// resource locals/params in the current fn that own an external handle and
+    /// need a Drop close-call (TcpStream/TcpListener/UdpSocket) on return paths.
+    live_drops: Vec<(String, &'static str)>,
+    /// heap-string locals in the current fn freed on return paths (Drop).
+    live_heap_strs: Vec<String>,
+    /// heap-string locals hoisted above a TCO loop label: declared once as NULL,
+    /// reassigned (not redeclared) each iteration, previous buffer freed first.
+    hoisted_heap_strs: HashSet<String>,
+    /// vars whose ownership escapes the current fn body — never auto-dropped.
+    current_escaped: HashSet<String>,
+    /// resource `::clone` nodes hoisted to a named temp before the consuming
+    /// statement. Keyed by the `Expr::Clone` node address → temp var name; the
+    /// Clone emit arm returns the temp instead of re-emitting the clone call.
+    clone_temps: RefCell<HashMap<usize, String>>,
+    /// counter for synthetic resource-clone temp names with non-`Var` operands.
+    clone_count: RefCell<usize>,
+    /// clone-temp names already declared in the current fn (collision avoidance).
+    clone_names: RefCell<HashSet<String>>,
+}
+
+/// Drop function for an external-resource type, or None for plain values.
+fn resource_close_fn(ty: &Type) -> Option<&'static str> {
+    match ty {
+        Type::Named(n) => match n.as_str() {
+            "TcpStream"   => Some("sirin_tcp_stream_close"),
+            "TcpListener" => Some("sirin_tcp_listener_close"),
+            "UdpSocket"   => Some("sirin_udp_socket_close"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Runtime deep-clone function for a resource type (duplicates the OS handle),
+/// or None for plain values. Resources wrap an fd, so a struct bit-copy would
+/// alias the handle — `::clone`/`:=` must `dup()` it instead.
+fn resource_clone_fn(ty: &Type) -> Option<&'static str> {
+    match ty {
+        Type::Named(n) => match n.as_str() {
+            "TcpStream"   => Some("sirin_tcp_stream_clone"),
+            "TcpListener" => Some("sirin_tcp_listener_clone"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// True if `e` is an addressable lvalue we can pass to a `*_clone(&x)` runtime fn.
+fn is_addressable(e: &Expr<'_>) -> bool {
+    matches!(e, Expr::Var(_) | Expr::FieldAccess(..) | Expr::Index(..))
 }
 
 // True if any Stmt::Return in stmts (recursively) has value = Expr::Call(fn_name, _)
@@ -410,6 +460,13 @@ impl Emitter {
             spawn_decls: String::new(),
             named_collection_decls: RefCell::new(HashMap::new()),
             globals: HashSet::new(),
+            live_drops: Vec::new(),
+            live_heap_strs: Vec::new(),
+            hoisted_heap_strs: HashSet::new(),
+            current_escaped: HashSet::new(),
+            clone_temps: RefCell::new(HashMap::new()),
+            clone_count: RefCell::new(0),
+            clone_names: RefCell::new(HashSet::new()),
         }
     }
 
@@ -445,6 +502,13 @@ impl Emitter {
             spawn_decls: String::new(),
             named_collection_decls: RefCell::new(self.named_collection_decls.borrow().clone()),
             globals: self.globals.clone(),
+            live_drops: Vec::new(),
+            live_heap_strs: Vec::new(),
+            hoisted_heap_strs: HashSet::new(),
+            current_escaped: HashSet::new(),
+            clone_temps: RefCell::new(HashMap::new()),
+            clone_count: RefCell::new(0),
+            clone_names: RefCell::new(HashSet::new()),
         }
     }
 
@@ -795,6 +859,21 @@ impl Emitter {
                     return;
                 }
 
+                // TCO-hoisted heap string: declared above `inicio:`. Free the previous
+                // iteration's buffer, then reassign (no redeclaration → no leak).
+                if self.hoisted_heap_strs.contains(name.node) {
+                    let value = self.emit_expr(&rhs.node);
+                    self.output.push_str(&format!(
+                        "{}if ({} != NULL) {{ sirin_cstr_free({}); }}\n",
+                        self.indent(), name.node, name.node));
+                    self.output.push_str(&format!(
+                        "{}{} = {};\n", self.indent(), name.node, value));
+                    return;
+                }
+
+                // Hoist any resource `::clone` in the rhs to a named temp first.
+                self.hoist_resource_clones(&rhs.node);
+
                 let inferred = self.get_expr(&rhs.node);
                 let ty = declared.as_ref().unwrap_or(&inferred);
 
@@ -926,10 +1005,25 @@ impl Emitter {
                 if matches!(stmt, Stmt::CopyLet { .. }) && matches!(ty, Type::Str) {
                     value = format!("sirin_str_clone({})", value);
                 }
+                // `:=` on a resource lvalue duplicates the OS handle (consistent with
+                // `::clone`); cloning a freshly-returned resource would leak, so only
+                // when the rhs is an existing addressable value.
+                if matches!(stmt, Stmt::CopyLet { .. }) && is_addressable(&rhs.node) {
+                    if let Some(cf) = resource_clone_fn(ty) {
+                        value = format!("{}(&{})", cf, value);
+                    }
+                }
                 self.vars.insert(name.node.to_string(), ty.clone());
+                // Track external-resource locals so return paths can Drop (close) them.
+                if !is_global {
+                    if let Some(cf) = resource_close_fn(ty) {
+                        self.live_drops.push((name.node.to_string(), cf));
+                    }
+                }
                 self.output.push_str(&format!("{} = {};\n", lhs, value));
             }
             Stmt::Return { cond, value } => {
+                if let Some(v) = value { self.hoist_resource_clones(&v.node); }
                 // Detect TCO: return value is a direct call to the current function
                 let tco_new_vals: Option<Vec<String>> =
                     match (value, self.current_fn.as_deref()) {
@@ -966,31 +1060,57 @@ impl Emitter {
                             .push_str(&format!("{}goto inicio;\n", self.indent()));
                     }
                 } else {
+                    // Drop live resources/heap-strings before leaving the function.
+                    let drops = self.return_drops(value.as_ref().map(|v| &**v));
                     match (cond, value) {
                         (Some(c), Some(v)) => {
                             let cond_str = self.emit_expr(&c.node);
                             let val_str = self.emit_ret_value(&v.node);
-                            self.output.push_str(&format!(
-                                "{}if ({}) return {};\n",
-                                self.indent(),
-                                cond_str,
-                                val_str
-                            ));
+                            if drops.is_empty() {
+                                self.output.push_str(&format!(
+                                    "{}if ({}) return {};\n", self.indent(), cond_str, val_str));
+                            } else {
+                                self.output.push_str(&format!(
+                                    "{}if ({}) {{\n", self.indent(), cond_str));
+                                self.depth += 1;
+                                for d in &drops {
+                                    self.output.push_str(&format!("{}{}\n", self.indent(), d));
+                                }
+                                self.output.push_str(&format!(
+                                    "{}return {};\n", self.indent(), val_str));
+                                self.depth -= 1;
+                                self.output.push_str(&format!("{}}}\n", self.indent()));
+                            }
                         }
                         (Some(c), None) => {
                             let cond_str = self.emit_expr(&c.node);
-                            self.output.push_str(&format!(
-                                "{}if ({}) return;\n",
-                                self.indent(),
-                                cond_str
-                            ));
+                            if drops.is_empty() {
+                                self.output.push_str(&format!(
+                                    "{}if ({}) return;\n", self.indent(), cond_str));
+                            } else {
+                                self.output.push_str(&format!(
+                                    "{}if ({}) {{\n", self.indent(), cond_str));
+                                self.depth += 1;
+                                for d in &drops {
+                                    self.output.push_str(&format!("{}{}\n", self.indent(), d));
+                                }
+                                self.output.push_str(&format!("{}return;\n", self.indent()));
+                                self.depth -= 1;
+                                self.output.push_str(&format!("{}}}\n", self.indent()));
+                            }
                         }
                         (None, Some(v)) => {
                             let val_str = self.emit_ret_value(&v.node);
+                            for d in &drops {
+                                self.output.push_str(&format!("{}{}\n", self.indent(), d));
+                            }
                             self.output
                                 .push_str(&format!("{}return {};\n", self.indent(), val_str));
                         }
                         (None, None) => {
+                            for d in &drops {
+                                self.output.push_str(&format!("{}{}\n", self.indent(), d));
+                            }
                             self.output.push_str(&format!("{}return;\n", self.indent()));
                         }
                     }
@@ -1049,17 +1169,52 @@ impl Emitter {
                 let outer_fn = self.current_fn.take();
                 let outer_params = std::mem::take(&mut self.current_fn_params);
                 let outer_ret = self.current_ret.replace(ret_ty.clone());
+                let outer_drops = std::mem::take(&mut self.live_drops);
+                let outer_heap_strs = std::mem::take(&mut self.live_heap_strs);
+                let outer_hoisted = std::mem::take(&mut self.hoisted_heap_strs);
+                let outer_escaped = std::mem::take(&mut self.current_escaped);
+
+                // Ownership that escapes this body must never be auto-dropped.
+                let mut escaped = HashSet::new();
+                for s in body { collect_escaped_stmt(&s.node, &mut escaped); }
+                self.current_escaped = escaped;
+
+                // Clone-temp bookkeeping is per-function.
+                self.clone_temps.borrow_mut().clear();
+                self.clone_names.borrow_mut().clear();
+
+                // Params in scope; resource params are droppable on return paths.
+                for (pname, ty) in args {
+                    self.vars.insert(pname.node.to_string(), ty.clone());
+                    if let Some(cf) = resource_close_fn(ty) {
+                        self.live_drops.push((pname.node.to_string(), cf));
+                    }
+                }
 
                 if tco {
+                    // Hoist heap-string locals above the loop label so each iteration
+                    // frees the previous buffer before reassigning (no leak per loop).
+                    for s in body {
+                        if let Stmt::Let { name, rhs, .. } | Stmt::CopyLet { name, rhs, .. } = &s.node {
+                            let is_cl = matches!(&s.node, Stmt::CopyLet { .. });
+                            if !self.globals.contains(name.node)
+                                && self.is_heap_str_rhs(is_cl, &rhs.node)
+                            {
+                                self.output.push_str(&format!(
+                                    "{}{} {} = NULL;\n",
+                                    self.indent(), self.type_to_c(&Type::Str), name.node));
+                                self.hoisted_heap_strs.insert(name.node.to_string());
+                                self.vars.insert(name.node.to_string(), Type::Str);
+                                self.live_heap_strs.push(name.node.to_string());
+                            }
+                        }
+                    }
                     self.output.push_str(&format!("{}inicio:\n", self.indent()));
                     self.current_fn = Some(fn_name.to_string());
                     self.current_fn_params =
                         args.iter().map(|(pname, _)| pname.node.to_string()).collect();
                 }
 
-                for (pname, ty) in args {
-                    self.vars.insert(pname.node.to_string(), ty.clone());
-                }
                 for s in body {
                     self.emit_stmt(&s.node);
                 }
@@ -1075,6 +1230,10 @@ impl Emitter {
                 self.current_fn = outer_fn;
                 self.current_fn_params = outer_params;
                 self.current_ret = outer_ret;
+                self.live_drops = outer_drops;
+                self.live_heap_strs = outer_heap_strs;
+                self.hoisted_heap_strs = outer_hoisted;
+                self.current_escaped = outer_escaped;
                 self.depth -= 1;
 
                 self.output.push_str(&format!("{}}}\n", self.indent()));
@@ -1216,6 +1375,7 @@ impl Emitter {
                 if expr_has_await(&expr.node) {
                     self.output.push_str(&format!("{}sirin_yield();\n", self.indent()));
                 }
+                self.hoist_resource_clones(&expr.node);
                 let val = self.emit_expr(&expr.node);
                 self.output.push_str(&format!("{}{};\n", self.indent(), val));
             }
@@ -1848,12 +2008,25 @@ impl Emitter {
                 let m = self.emit_expr(&inner.node);
                 format!("({tname}){{ .ok = 0, .err = ({m}) }}")
             }
-            // `a::clone` — deep copy. Strings get their own buffer; copy types and
-            // (for now) collections/structs pass through (matches `:=` semantics).
+            // `a::clone` — deep copy. Strings get their own buffer; resource types
+            // duplicate the OS handle via the runtime; plain copy types and (for now)
+            // data structs/collections pass through (matches `:=` semantics).
             Expr::Clone(inner) => {
+                // If this clone was hoisted to a named temp, return that temp.
+                let key = expr as *const Expr as usize;
+                if let Some(t) = self.clone_temps.borrow().get(&key) {
+                    return t.clone();
+                }
                 let v = self.emit_expr(&inner.node);
-                if matches!(self.get_expr(&inner.node), Type::Str) {
+                let inner_ty = self.get_expr(&inner.node);
+                if matches!(inner_ty, Type::Str) {
                     format!("sirin_str_clone({})", v)
+                } else if let Some(cf) = resource_clone_fn(&inner_ty) {
+                    if is_addressable(&inner.node) {
+                        format!("{}(&{})", cf, v)
+                    } else {
+                        v // fresh resource value, not aliased — nothing to dup
+                    }
                 } else {
                     v
                 }
@@ -2324,11 +2497,102 @@ impl Emitter {
             Expr::Call(n, _) if *n == "readln" => true,
             // `x = a::clone` on a string allocates a fresh owned buffer.
             Expr::Clone(inner) => matches!(self.get_expr(&inner.node), Type::Str),
-            Expr::MethodCall(obj, m, _) =>
-                matches!(self.get_expr(&obj.node), Type::Str)
-                    && matches!(*m, "to_upper" | "to_lower" | "slice" | "trim" | "replace" | "char_at"),
+            // `.await` is transparent for ownership: unwrap and inspect the inner call.
+            Expr::Await(inner) => self.is_heap_str_rhs(is_copylet, &inner.node),
+            Expr::MethodCall(obj, m, _) => {
+                let obj_ty = self.get_expr(&obj.node);
+                // str-producing string ops allocate a new buffer…
+                (matches!(obj_ty, Type::Str)
+                    && matches!(*m, "to_upper" | "to_lower" | "slice" | "trim" | "replace" | "char_at"))
+                // …as does TcpStream.read() (malloc'd const char*).
+                || (matches!(&obj_ty, Type::Named(n) if n == "TcpStream") && *m == "read")
+            }
             _ => false,
         }
+    }
+
+    /// Hoist resource `::clone` sub-expressions in `e` into named temp vars,
+    /// emitting `T _clone_x = sirin_T_clone(&x);` before the consuming statement.
+    /// The Clone emit arm then returns the temp (looked up by node address).
+    fn hoist_resource_clones<'a>(&mut self, e: &'a Expr<'a>) {
+        match e {
+            Expr::Clone(inner) => {
+                let inner_ty = self.get_expr(&inner.node);
+                if let (Some(cf), true) =
+                    (resource_clone_fn(&inner_ty), is_addressable(&inner.node))
+                {
+                    let key = e as *const Expr as usize;
+                    if !self.clone_temps.borrow().contains_key(&key) {
+                        let operand = self.emit_expr(&inner.node);
+                        let base = match &inner.node {
+                            Expr::Var(v) => format!("_clone_{}", v),
+                            _ => {
+                                let n = *self.clone_count.borrow();
+                                *self.clone_count.borrow_mut() = n + 1;
+                                format!("_clone_t{}", n)
+                            }
+                        };
+                        // Disambiguate if the name is already taken in this fn.
+                        let mut temp = base.clone();
+                        while self.clone_names.borrow().contains(&temp) {
+                            let n = *self.clone_count.borrow();
+                            *self.clone_count.borrow_mut() = n + 1;
+                            temp = format!("{}_{}", base, n);
+                        }
+                        self.clone_names.borrow_mut().insert(temp.clone());
+                        let cty = self.type_to_c(&inner_ty);
+                        self.output.push_str(&format!(
+                            "{}{} {} = {}(&{});\n", self.indent(), cty, temp, cf, operand));
+                        self.clone_temps.borrow_mut().insert(key, temp);
+                    }
+                }
+                self.hoist_resource_clones(&inner.node);
+            }
+            Expr::MethodCall(obj, _, args) => {
+                self.hoist_resource_clones(&obj.node);
+                for a in args { self.hoist_resource_clones(&a.node); }
+            }
+            Expr::Call(_, args) | Expr::New(_, args) => {
+                for a in args { self.hoist_resource_clones(&a.node); }
+            }
+            Expr::Some(i) | Expr::Ok(i) | Expr::Err(i) | Expr::Await(i)
+            | Expr::Neg(i) | Expr::Not(i) => self.hoist_resource_clones(&i.node),
+            Expr::BinOp(_, l, r) => {
+                self.hoist_resource_clones(&l.node);
+                self.hoist_resource_clones(&r.node);
+            }
+            Expr::Index(b, i) => {
+                self.hoist_resource_clones(&b.node);
+                self.hoist_resource_clones(&i.node);
+            }
+            Expr::FieldAccess(o, _) => self.hoist_resource_clones(&o.node),
+            Expr::Array(items) => {
+                for it in items { self.hoist_resource_clones(&it.node); }
+            }
+            Expr::ObjectLiteral(fs) | Expr::NewFields(_, fs) => {
+                for (_, v) in fs { self.hoist_resource_clones(&v.node); }
+            }
+            _ => {}
+        }
+    }
+
+    /// Drop statements (no indent) for resources/heap-strings live at a return.
+    /// Skips the var being returned (moved out) and anything that escapes.
+    fn return_drops(&self, value: Option<&Spanned<Expr<'_>>>) -> Vec<String> {
+        let moved = match value.map(|v| &v.node) {
+            Some(Expr::Var(x)) => Some(*x),
+            _ => None,
+        };
+        let mut out = Vec::new();
+        for (name, cf) in &self.live_drops {
+            if Some(name.as_str()) == moved || self.current_escaped.contains(name) { continue; }
+            out.push(format!("{}(&{});", cf, name));
+        }
+        for name in &self.live_heap_strs {
+            if Some(name.as_str()) == moved || self.current_escaped.contains(name) { continue; }
+            out.push(format!("sirin_cstr_free({});", name));
+        }
+        out
     }
 
     /// Emit `sirin_cstr_free` for owned heap-string locals in `body` that don't

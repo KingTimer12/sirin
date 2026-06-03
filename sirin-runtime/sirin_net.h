@@ -14,12 +14,14 @@ typedef struct { int fd; } SirinTcpStream;
 SirinTcpListener sirin_tcp_listener_bind(const char* addr, int port);
 SirinTcpStream   sirin_tcp_listener_accept(SirinTcpListener* l);
 void             sirin_tcp_listener_close(SirinTcpListener* l);
+SirinTcpListener sirin_tcp_listener_clone(SirinTcpListener* l);
 
 /* stream */
 SirinTcpStream   sirin_tcp_stream_connect(const char* addr, int port);
 const char*      sirin_tcp_stream_read(SirinTcpStream* s);
 void             sirin_tcp_stream_write(SirinTcpStream* s, const char* data);
 void             sirin_tcp_stream_close(SirinTcpStream* s);
+SirinTcpStream   sirin_tcp_stream_clone(SirinTcpStream* s);
 
 /* ── UDP ── */
 typedef struct { int fd; } SirinUdpSocket;
