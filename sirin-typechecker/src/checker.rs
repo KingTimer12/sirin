@@ -317,6 +317,41 @@ impl<'a> Checker<'a> {
 
                 Ok(())
             }
+            Stmt::While { cond, body } => {
+                let cond_ty = self.check_expr(cond)?;
+                if cond_ty != Type::Bool {
+                    return Err(CheckerError::TypeError(Type::Bool, cond_ty));
+                }
+                self.env.push_scope();
+                for stmt in body {
+                    self.check_stmt(stmt)?;
+                }
+                self.env.pop_scope();
+                Ok(())
+            }
+            Stmt::For { var, start, end, body } => {
+                let start_ty = self.check_expr(start)?;
+                let end_ty = self.check_expr(end)?;
+                let is_int = |t: &Type| matches!(
+                    t,
+                    Type::Int | Type::I64 | Type::I32 | Type::I16 | Type::I8
+                        | Type::U64 | Type::U32 | Type::U16 | Type::U8
+                );
+                if !is_int(&start_ty) {
+                    return Err(CheckerError::TypeError(Type::Int, start_ty));
+                }
+                if !is_int(&end_ty) {
+                    return Err(CheckerError::TypeError(Type::Int, end_ty));
+                }
+                self.env.push_scope();
+                self.env.define(var.node, Type::Int);
+                for stmt in body {
+                    self.check_stmt(stmt)?;
+                }
+                self.env.pop_scope();
+                Ok(())
+            }
+            Stmt::Break | Stmt::Continue => Ok(()),
             Stmt::IfLet { pattern, name, expr, then, else_ } => {
                 let scrutinee = self.check_expr(expr)?;
                 // Resolve the bound name's type from the pattern + scrutinee shape.

@@ -59,6 +59,7 @@ mod tests {
                 args,
                 return_type,
                 body,
+                ..
             } => {
                 assert_eq!(name.node, "soma");
                 assert_eq!(args.len(), 2);
@@ -111,6 +112,7 @@ mod tests {
                 args,
                 return_type,
                 body,
+                ..
             } => {
                 assert_eq!(name.node, "noop");
                 assert_eq!(args[0].0.node, "x");

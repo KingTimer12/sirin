@@ -624,6 +624,49 @@ pub fn parser<'a>()
                 )
             });
 
+        let block = decl
+            .clone()
+            .repeated()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd));
+
+        let r#while = just(Tokens::While)
+            .ignore_then(
+                expr.clone()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+            )
+            .then(block.clone())
+            .map_with(|(cond, body), extra| {
+                Spanned::new(
+                    Stmt::While { cond: Box::new(cond), body },
+                    sp(extra.span()),
+                )
+            });
+
+        let r#for = just(Tokens::For)
+            .ignore_then(spanned_name.clone())
+            .then_ignore(just(Tokens::In))
+            .then(expr.clone())
+            .then_ignore(just(Tokens::DotDot))
+            .then(expr.clone())
+            .then(block.clone())
+            .map_with(|(((var, start), end), body), extra| {
+                Spanned::new(
+                    Stmt::For {
+                        var,
+                        start: Box::new(start),
+                        end: Box::new(end),
+                        body,
+                    },
+                    sp(extra.span()),
+                )
+            });
+
+        let r#break = just(Tokens::Break)
+            .map_with(|_, extra| Spanned::new(Stmt::Break, sp(extra.span())));
+        let r#continue = just(Tokens::Continue)
+            .map_with(|_, extra| Spanned::new(Stmt::Continue, sp(extra.span())));
+
         let fn_body = choice((
             just(Tokens::FatArrow)
                 .ignore_then(expr.clone())
@@ -929,6 +972,10 @@ pub fn parser<'a>()
             .or(r#return)
             .or(if_let)
             .or(r#if)
+            .or(r#while)
+            .or(r#for)
+            .or(r#break)
+            .or(r#continue)
             .or(r#fn)
             .or(spawn_stmt)
             .or(class_stmt)

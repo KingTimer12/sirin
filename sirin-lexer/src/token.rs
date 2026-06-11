@@ -23,6 +23,16 @@ pub enum Tokens<'a> {
     If,
     #[token("else")]
     Else,
+    #[token("while")]
+    While,
+    #[token("for")]
+    For,
+    #[token("in")]
+    In,
+    #[token("break")]
+    Break,
+    #[token("continue")]
+    Continue,
     #[token("and")]
     And,
     #[token("or")]
@@ -167,6 +177,8 @@ pub enum Tokens<'a> {
     #[token("Set")]
     SetType,
 
+    #[token("..")]
+    DotDot,
     #[token(".")]
     Dot,
 
@@ -193,7 +205,7 @@ pub enum Tokens<'a> {
         })
     })]
     Integer(i64),
-    #[regex(r"[+-]?([0-9]+[.][0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?", |lex| lex.slice().parse())]
+    #[regex(r"[+-]?([0-9]+[.][0-9]+|[.][0-9]+)([eE][+-]?[0-9]+)?", |lex| lex.slice().parse())]
     Float(f64),
     #[regex(r#""([^"\\]|\\.)*""#, |lex| {
         let s = lex.slice();

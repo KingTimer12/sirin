@@ -71,6 +71,20 @@ pub enum Stmt<'a> {
         then: Vec<Spanned<Stmt<'a>>>,
         else_: Option<Vec<Spanned<Stmt<'a>>>>,
     },
+    // `while (cond) { .. }`
+    While {
+        cond: Box<Spanned<Expr<'a>>>,
+        body: Vec<Spanned<Stmt<'a>>>,
+    },
+    // `for i in start..end { .. }` — half-open integer range.
+    For {
+        var: Spanned<&'a str>,
+        start: Box<Spanned<Expr<'a>>>,
+        end: Box<Spanned<Expr<'a>>>,
+        body: Vec<Spanned<Stmt<'a>>>,
+    },
+    Break,
+    Continue,
     // `if Some(name) = opt { .. }` / `if Ok(x) = r { .. }` / `if Err(e) = r { .. }`
     // — binds the destructured value when the pattern matches.
     IfLet {

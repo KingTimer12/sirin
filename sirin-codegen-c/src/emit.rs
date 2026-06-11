@@ -72,6 +72,10 @@ pub struct Emitter {
     clone_count: RefCell<usize>,
     /// clone-temp names already declared in the current fn (collision avoidance).
     clone_names: RefCell<HashSet<String>>,
+    /// stack of lexical scopes holding the C variable names declared in each block.
+    /// Used so `name = rhs` re-assigns an in-scope local instead of redeclaring it
+    /// (which would shadow it and silently drop mutations — e.g. loop accumulators).
+    scopes: Vec<HashSet<String>>,
 }
 
 /// Drop function for an external-resource type, or None for plain values.
@@ -221,6 +225,20 @@ fn check_no_non_tail_recursive<'a>(
                 if expr_has_recursive_call(&e.node, fn_name) {
                     return Err(err());
                 }
+            }
+            Stmt::While { cond, body } => {
+                if expr_has_recursive_call(&cond.node, fn_name) {
+                    return Err(err());
+                }
+                check_no_non_tail_recursive(body, fn_name)?;
+            }
+            Stmt::For { start, end, body, .. } => {
+                if expr_has_recursive_call(&start.node, fn_name)
+                    || expr_has_recursive_call(&end.node, fn_name)
+                {
+                    return Err(err());
+                }
+                check_no_non_tail_recursive(body, fn_name)?;
             }
             Stmt::Fn { .. } => {} // nested fn has its own scope
             _ => {}
@@ -508,7 +526,20 @@ impl Emitter {
             clone_temps: RefCell::new(HashMap::new()),
             clone_count: RefCell::new(0),
             clone_names: RefCell::new(HashSet::new()),
+            scopes: vec![HashSet::new()],
         }
+    }
+
+    /// Enter/leave a lexical block scope for declared-variable tracking.
+    fn scope_enter(&mut self) { self.scopes.push(HashSet::new()); }
+    fn scope_exit(&mut self) { self.scopes.pop(); }
+    /// True if `name` was already declared in the current scope chain.
+    fn is_declared(&self, name: &str) -> bool {
+        self.scopes.iter().any(|s| s.contains(name))
+    }
+    /// Record `name` as declared in the innermost scope.
+    fn declare_var(&mut self, name: &str) {
+        if let Some(top) = self.scopes.last_mut() { top.insert(name.to_string()); }
     }
 
     /// Create a child emitter for emitting spawn function bodies.
@@ -550,6 +581,7 @@ impl Emitter {
             clone_temps: RefCell::new(HashMap::new()),
             clone_count: RefCell::new(0),
             clone_names: RefCell::new(HashSet::new()),
+            scopes: vec![HashSet::new()],
         }
     }
 
@@ -683,6 +715,15 @@ fn collect_stmt_vars<'a>(stmt: &Stmt<'a>, out: &mut std::collections::HashSet<St
             }
         }
         Stmt::TryAssign { rhs, .. } => collect_expr_vars(&rhs.node, out),
+        Stmt::While { cond, body } => {
+            collect_expr_vars(&cond.node, out);
+            for s in body { collect_stmt_vars(&s.node, out); }
+        }
+        Stmt::For { start, end, body, .. } => {
+            collect_expr_vars(&start.node, out);
+            collect_expr_vars(&end.node, out);
+            for s in body { collect_stmt_vars(&s.node, out); }
+        }
         Stmt::Fn { body, .. } => {
             for s in body { collect_stmt_vars(&s.node, out); }
         }
@@ -768,6 +809,15 @@ fn collect_escaped_stmt<'a>(s: &Stmt<'a>, out: &mut HashSet<String>) {
             if let Some(e) = else_ { for st in e { collect_escaped_stmt(&st.node, out); } }
         }
         Stmt::TryAssign { rhs, .. } => collect_escaped_expr(&rhs.node, out),
+        Stmt::While { cond, body } => {
+            collect_escaped_expr(&cond.node, out);
+            for st in body { collect_escaped_stmt(&st.node, out); }
+        }
+        Stmt::For { start, end, body, .. } => {
+            collect_escaped_expr(&start.node, out);
+            collect_escaped_expr(&end.node, out);
+            for st in body { collect_escaped_stmt(&st.node, out); }
+        }
         // A coroutine may outlive the spawning scope and aliases captured values,
         // so conservatively treat every var it references as escaped (never free).
         Stmt::Spawn { body } => {
@@ -923,6 +973,7 @@ impl Emitter {
                 //   Vec[T]   → dynamic: sirin_vec_T_new + repeated push
                 if let Expr::Array(items) = &rhs.node {
                     self.vars.insert(name.node.to_string(), ty.clone());
+                    self.declare_var(name.node);
                     match ty {
                         Type::Array(inner) => {
                             let c_elem = self.type_to_c(inner);
@@ -990,17 +1041,22 @@ impl Emitter {
                         format!("{}{} {}", self.indent(), cty, name.node)
                     };
                     self.vars.insert(name.node.to_string(), ty.clone());
+                    self.declare_var(name.node);
                     self.output.push_str(&format!("{} = ({}){{ {} }};\n", lhs, cty, inits));
                     return;
                 }
 
                 // Globals are declared at file scope → assign without a type prefix.
+                // An already-declared local is re-assigned (no redeclaration → mutation
+                // sticks, e.g. `soma = soma + i` in a loop body).
                 let is_global = self.globals.contains(name.node);
-                let lhs = if is_global {
+                let reassign = is_global || self.is_declared(name.node);
+                let lhs = if reassign {
                     format!("{}{}", self.indent(), name.node)
                 } else {
                     format!("{}{} {}", self.indent(), self.type_to_c(ty), name.node)
                 };
+                if !is_global { self.declare_var(name.node); }
 
                 // Collection constructor (Vec/Array/Map/Set) with declared type
                 // → use type-specific constructor instead of generic fallback
@@ -1214,6 +1270,9 @@ impl Emitter {
                 let outer_heap_strs = std::mem::take(&mut self.live_heap_strs);
                 let outer_hoisted = std::mem::take(&mut self.hoisted_heap_strs);
                 let outer_escaped = std::mem::take(&mut self.current_escaped);
+                // Fresh scope chain so the fn body never sees top-level locals as
+                // "declared" (which would turn a same-named local into a bad reassign).
+                let outer_scopes = std::mem::replace(&mut self.scopes, vec![HashSet::new()]);
 
                 // Ownership that escapes this body must never be auto-dropped.
                 let mut escaped = HashSet::new();
@@ -1229,6 +1288,7 @@ impl Emitter {
                 // Only resource *locals* created in the body are dropped on return.
                 for (pname, ty) in args {
                     self.vars.insert(pname.node.to_string(), ty.clone());
+                    self.declare_var(pname.node);
                 }
 
                 if tco {
@@ -1274,6 +1334,7 @@ impl Emitter {
                 self.live_heap_strs = outer_heap_strs;
                 self.hoisted_heap_strs = outer_hoisted;
                 self.current_escaped = outer_escaped;
+                self.scopes = outer_scopes;
                 self.depth -= 1;
 
                 self.output.push_str(&format!("{}}}\n", self.indent()));
@@ -1294,23 +1355,62 @@ impl Emitter {
                     .push_str(&format!("{}if ({}) {{\n", self.indent(), cond_str));
 
                 self.depth += 1;
+                self.scope_enter();
                 for s in then {
                     self.emit_stmt(&s.node);
                 }
+                self.scope_exit();
                 self.depth -= 1;
 
                 if let Some(else_body) = else_ {
                     self.output
                         .push_str(&format!("{}}} else {{\n", self.indent()));
                     self.depth += 1;
+                    self.scope_enter();
                     for s in else_body {
                         self.emit_stmt(&s.node);
                     }
+                    self.scope_exit();
                     self.depth -= 1;
                 }
 
                 self.output.push_str(&format!("{}}}\n", self.indent()));
             }
+            Stmt::While { cond, body } => {
+                let cond_str = self.emit_expr(&cond.node);
+                self.output
+                    .push_str(&format!("{}while ({}) {{\n", self.indent(), cond_str));
+                self.depth += 1;
+                self.scope_enter();
+                for s in body { self.emit_stmt(&s.node); }
+                self.scope_exit();
+                self.depth -= 1;
+                self.output.push_str(&format!("{}}}\n", self.indent()));
+            }
+            Stmt::For { var, start, end, body } => {
+                let start_str = self.emit_expr(&start.node);
+                let end_str = self.emit_expr(&end.node);
+                // Hoist the bound so it is evaluated once, not every iteration.
+                let id = self.spawn_count;
+                self.spawn_count += 1;
+                let end_var = format!("__for_end{}", id);
+                let v = var.node;
+                self.vars.insert(v.to_string(), Type::Int);
+                self.output.push_str(&format!(
+                    "{}int64_t {} = {};\n", self.indent(), end_var, end_str));
+                self.output.push_str(&format!(
+                    "{}for (int64_t {} = {}; {} < {}; {}++) {{\n",
+                    self.indent(), v, start_str, v, end_var, v));
+                self.depth += 1;
+                self.scope_enter();
+                self.declare_var(v);
+                for s in body { self.emit_stmt(&s.node); }
+                self.scope_exit();
+                self.depth -= 1;
+                self.output.push_str(&format!("{}}}\n", self.indent()));
+            }
+            Stmt::Break => self.output.push_str(&format!("{}break;\n", self.indent())),
+            Stmt::Continue => self.output.push_str(&format!("{}continue;\n", self.indent())),
             Stmt::IfLet { pattern, name, expr, then, else_ } => {
                 // `Some` → NULL-check a pointer; `Ok`/`Err` → check the Try tag.
                 let scrut_ty = self.get_expr(&expr.node);
@@ -1349,20 +1449,25 @@ impl Emitter {
                 self.output.push_str(&format!("{}if ({}) {{\n", self.indent(), cond));
 
                 self.depth += 1;
+                self.scope_enter();
                 self.output.push_str(&format!(
                     "{}{} {} = {};\n", self.indent(), bind_cty, name.node, payload));
                 self.vars.insert(name.node.to_string(), bind_ty);
+                self.declare_var(name.node);
                 for s in then {
                     self.emit_stmt(&s.node);
                 }
+                self.scope_exit();
                 self.depth -= 1;
 
                 if let Some(else_body) = else_ {
                     self.output.push_str(&format!("{}}} else {{\n", self.indent()));
                     self.depth += 1;
+                    self.scope_enter();
                     for s in else_body {
                         self.emit_stmt(&s.node);
                     }
+                    self.scope_exit();
                     self.depth -= 1;
                 }
 
