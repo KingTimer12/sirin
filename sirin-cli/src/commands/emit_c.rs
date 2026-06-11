@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use clap::ArgMatches;
@@ -6,8 +6,10 @@ use chumsky::Parser;
 use chumsky::input::Input as _;
 use chumsky::span::SimpleSpan;
 use sirin_codegen_c::emit::{Emitter, ModuleExports};
+use sirin_parser::aliases::resolve_aliases;
 use sirin_parser::parser::parser;
 use sirin_parser::stmt::Stmt;
+use sirin_parser::types::Type;
 use sirin_typechecker::checker::Checker;
 
 use crate::resolver::{ModuleSource, collect_modules, resolve};
@@ -33,13 +35,16 @@ pub fn execute(matches: &ArgMatches) {
     // Parse main
     let tokens = sirin_parser::lex(&src);
     let eoi = SimpleSpan::from(src.len()..src.len());
-    let main_stmts = match parser().parse(tokens.as_slice().split_token_span(eoi)).into_result() {
+    let mut main_stmts = match parser().parse(tokens.as_slice().split_token_span(eoi)).into_result() {
         Ok(s) => s,
         Err(errors) => {
             for e in &errors { eprintln!("parse error: {:?}", e); }
             std::process::exit(1);
         }
     };
+
+    // Type aliases are erased before checking/codegen; the map is shared across units.
+    let mut alias_map: HashMap<String, Type> = HashMap::new();
 
     // ── Collect transitive local module dependencies ──────────────────────────
     let mut dep_stack: Vec<PathBuf> = vec![];
@@ -80,7 +85,7 @@ pub fn execute(matches: &ArgMatches) {
     for (mod_path, mod_src) in &ordered {
         let mod_tokens = sirin_parser::lex(mod_src.as_str());
         let mod_eoi = SimpleSpan::from(mod_src.len()..mod_src.len());
-        let mod_stmts = match parser()
+        let mut mod_stmts = match parser()
             .parse(mod_tokens.as_slice().split_token_span(mod_eoi))
             .into_result()
         {
@@ -91,6 +96,7 @@ pub fn execute(matches: &ArgMatches) {
             }
         };
 
+        resolve_aliases(&mut mod_stmts, &mut alias_map);
         checker.import_module(&mod_stmts);
 
         let label = mod_path
@@ -98,7 +104,9 @@ pub fn execute(matches: &ArgMatches) {
             .unwrap_or(mod_path)
             .display()
             .to_string();
-        let (mod_c, exports) = Emitter::new().emit_module(&mod_stmts);
+        let mut mod_emitter = Emitter::new();
+        mod_emitter.absorb_exports(&all_exports);
+        let (mod_c, exports) = mod_emitter.emit_module(&mod_stmts);
         modules_c.push_str(&format!("/* === módulo: {} === */\n{}\n", label, mod_c));
 
         all_exports.fns.extend(exports.fns);
@@ -108,10 +116,13 @@ pub fn execute(matches: &ArgMatches) {
             all_exports.prim_methods.entry(k).or_default().extend(v);
         }
         all_exports.used_types.extend(exports.used_types);
+        all_exports.named_collection_decls.extend(exports.named_collection_decls);
         if exports.io_imported { all_exports.io_imported = true; }
     }
 
     // ── Typecheck main ────────────────────────────────────────────────────────
+    resolve_aliases(&mut main_stmts, &mut alias_map);
+
     let mut had_error = false;
     for stmt in &main_stmts {
         if let Err(e) = checker.check_stmt(stmt) {

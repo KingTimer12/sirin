@@ -106,6 +106,21 @@ fn is_addressable(e: &Expr<'_>) -> bool {
     matches!(e, Expr::Var(_) | Expr::FieldAccess(..) | Expr::Index(..))
 }
 
+/// Map a Sirin function name to the C identifier used to emit it.
+///
+/// A user function literally named `main` would clobber the program entry
+/// point that codegen synthesizes as `int main(void)`. Rename it to a stable
+/// `main_<hash>` so both can coexist (the synthesized entry then calls it).
+fn c_fn_name(name: &str) -> String {
+    if name == "main" {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write(b"main");
+        format!("main_{:016x}", h.finish())
+    } else {
+        name.to_string()
+    }
+}
+
 // True if any Stmt::Return in stmts (recursively) has value = Expr::Call(fn_name, _)
 fn has_tail_call<'a>(stmts: &[Spanned<Stmt<'a>>], fn_name: &str) -> bool {
     stmts.iter().any(|s| match &s.node {
@@ -256,6 +271,32 @@ fn type_mangle(ty: &Type) -> String {
         Type::Channel(t)  => format!("chan_{}", type_mangle(t)),
         Type::Named(n)    => to_snake_case(n),
         Type::Void        => "void".to_string(),
+        // Structural types hash their shape so distinct structs/signatures don't collide
+        // (e.g. `Try[Request]` vs `Try[{method,path}]` must mangle differently).
+        Type::Struct(fields) => {
+            let mut sig = String::new();
+            for (n, t) in fields {
+                sig.push_str(n);
+                sig.push(':');
+                sig.push_str(&type_mangle(t));
+                sig.push(';');
+            }
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            h.write(sig.as_bytes());
+            format!("obj_{:016x}", h.finish())
+        }
+        Type::Func(args, ret) => {
+            let mut sig = String::new();
+            for a in args {
+                sig.push_str(&type_mangle(a));
+                sig.push(',');
+            }
+            sig.push_str("->");
+            sig.push_str(&type_mangle(ret));
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            h.write(sig.as_bytes());
+            format!("fn_{:016x}", h.finish())
+        }
         _                 => collection_suffix(ty).1.to_string(), // primitives
     }
 }
@@ -1159,7 +1200,7 @@ impl Emitter {
                     "{}{} {}({}) {{\n",
                     self.indent(),
                     ret,
-                    fn_name,
+                    c_fn_name(fn_name),
                     params
                 ));
 
@@ -1183,12 +1224,11 @@ impl Emitter {
                 self.clone_temps.borrow_mut().clear();
                 self.clone_names.borrow_mut().clear();
 
-                // Params in scope; resource params are droppable on return paths.
+                // Params are borrowed (the ownership model never moves fn args), so a
+                // resource passed in is owned by the caller — never auto-closed here.
+                // Only resource *locals* created in the body are dropped on return.
                 for (pname, ty) in args {
                     self.vars.insert(pname.node.to_string(), ty.clone());
-                    if let Some(cf) = resource_close_fn(ty) {
-                        self.live_drops.push((pname.node.to_string(), cf));
-                    }
                 }
 
                 if tco {
@@ -1731,7 +1771,7 @@ impl Emitter {
                             "Array" => format!("sirin_array_int_new({})", args_str),
                             "Map"   => "sirin_map_str_int_new()".to_string(),
                             "Set"   => "sirin_set_int_new()".to_string(),
-                            _       => format!("{}({})", name, args_str),
+                            _       => format!("{}({})", c_fn_name(name), args_str),
                         }
                     }
                 }
@@ -1806,8 +1846,10 @@ impl Emitter {
                     Type::Map(_, val) => {
                         let (_, vs) = collection_suffix(&val);
                         match *method {
-                            "insert" => format!("sirin_map_str_{}_insert(&{}, {})", vs, obj_str, args_str),
-                            _        => format!("sirin_map_str_{}_get(&{}, {})",    vs, obj_str, args_str),
+                            "insert" | "set" => format!("sirin_map_str_{}_insert(&{}, {})", vs, obj_str, args_str),
+                            "len"      => format!("(int64_t)({}.len)", obj_str),
+                            "keys_at"  => format!("sirin_map_str_{}_key_at(&{}, {})", vs, obj_str, args_str),
+                            _          => format!("sirin_map_str_{}_get_opt(&{}, {})", vs, obj_str, args_str),
                         }
                     }
                     Type::Set(inner) => {
@@ -1918,6 +1960,10 @@ impl Emitter {
                         }
                     }
                     _ => {
+                        // `int.to_str()` → heap decimal string.
+                        if *method == "to_str" && obj_ty.is_integer() {
+                            return format!("sirin_int_to_str({})", obj_str);
+                        }
                         // Check primitive impl methods registered via `impl T`
                         let prefix = match &obj_ty {
                             Type::Int | Type::I64 => Some("int"),
@@ -2043,6 +2089,10 @@ impl Emitter {
                 {
                     let cmp = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
                     return format!("(strcmp({}, {}) {} 0)", l, r, cmp);
+                }
+                // String concatenation allocates a fresh buffer.
+                if matches!(op, BinOp::Add) && matches!(self.get_expr(&lhs.node), Type::Str) {
+                    return format!("sirin_str_concat({}, {})", l, r);
                 }
                 let op = match op {
                     BinOp::Add => "+",
@@ -2171,6 +2221,18 @@ impl Emitter {
                 sname
             }
             Type::Channel(_) => "SirinChannel*".to_string(),
+            Type::Func(args, ret) => {
+                // Render as a function-pointer typedef so the name works uniformly as a
+                // param type, struct field, local, or cast — `R (*__sirin_fn_x)(A, B)`.
+                let ret_c = self.type_to_c(ret);
+                let arg_cs: Vec<String> = args.iter().map(|a| self.type_to_c(a)).collect();
+                let sig = format!("{}({})", ret_c, arg_cs.join(","));
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                hasher.write(sig.as_bytes());
+                let fname = format!("__sirin_fn_{:016x}", hasher.finish());
+                self.register_fn_type(&fname, &ret_c, &arg_cs);
+                fname
+            }
         };
         if let Some(define) = ty_to_define(ty) {
             self.used_types.borrow_mut().insert(define.to_string());
@@ -2211,7 +2273,13 @@ impl Emitter {
             Expr::Call(name, _) => match *name {
                 "print" | "println" => Type::Void,
                 "readln"            => Type::Str,
-                _                   => self.fns.get(*name).cloned().unwrap_or(Type::Void),
+                _ => {
+                    // Calling through a function-typed local/param yields its return type.
+                    if let Some(Type::Func(_, ret)) = self.vars.get(*name) {
+                        return (**ret).clone();
+                    }
+                    self.fns.get(*name).cloned().unwrap_or(Type::Void)
+                }
             },
             Expr::Array(items) => {
                 let inner = items.first().map_or(Type::Int, |i| self.get_expr(&i.node));
@@ -2226,6 +2294,7 @@ impl Emitter {
                 if matches!(&obj.node, Expr::Var("TcpStream") | Expr::NewDefault("TcpStream")) {
                     if *method == "connect" { return Type::Named("TcpStream".to_string()); }
                 }
+                if *method == "to_str" { return Type::Str; }
                 let obj_ty = self.get_expr(&obj.node);
                 match &obj_ty {
                     Type::Channel(inner) => match *method {
@@ -2238,9 +2307,12 @@ impl Emitter {
                         "len" => Type::Int,
                         _ => *inner.clone(),
                     },
-                    Type::Map(_, v) => {
-                        if *method == "insert" { Type::Void } else { *v.clone() }
-                    }
+                    Type::Map(_, v) => match *method {
+                        "insert" | "set" => Type::Void,
+                        "len"            => Type::Int,
+                        "keys_at"        => Type::Nullable(Box::new(Type::Str)),
+                        _                => Type::Nullable(v.clone()),
+                    },
                     Type::Set(_) => match *method {
                         "insert" => Type::Void,
                         "contains" => Type::Bool,
@@ -2420,7 +2492,13 @@ impl Emitter {
         // Remember where to insert spawn declarations (after fns, before main)
         let spawn_insert_pos = self.output.len();
 
-        if !rest.is_empty() {
+        // A user `fn main` was emitted as `main_<hash>` (see c_fn_name); the
+        // synthesized entry below calls it so it still runs as the program entry.
+        let user_main = fn_stmts.iter().any(|s| matches!(
+            &s.node, Stmt::Fn { name, .. } if name.node == "main"
+        ));
+
+        if !rest.is_empty() || user_main {
             if self.async_imported {
                 self.output.push_str("int main(void) {\n    sirin_loop_init();\n");
                 if self.net_imported {
@@ -2436,6 +2514,9 @@ impl Emitter {
             // Drop owned heap-string locals before main exits (vars captured by a
             // spawn are treated as escaped, so coroutines never see freed memory).
             self.emit_str_drops(&rest);
+            if user_main {
+                self.output.push_str(&format!("{}{}();\n", self.indent(), c_fn_name("main")));
+            }
             self.depth -= 1;
             if self.async_imported {
                 self.output.push_str("    sirin_loop_run();\n");
@@ -2466,10 +2547,19 @@ impl Emitter {
     fn named_collection_decls_string(&self) -> String {
         let map = self.named_collection_decls.borrow();
         if map.is_empty() { return String::new(); }
-        let mut entries: Vec<&String> = map.values().collect();
-        entries.sort();
+        // Emit by dependency category: collections first, then anon structs, then the
+        // `Try[T]` tagged structs that wrap them, then function-pointer typedefs that
+        // reference both. Within a category, sort for stable output.
+        fn rank(key: &str) -> u8 {
+            if key.starts_with("Struct_") { 1 }
+            else if key.starts_with("Try_") { 2 }
+            else if key.starts_with("FnType_") { 3 }
+            else { 0 }
+        }
+        let mut entries: Vec<(&String, &String)> = map.iter().collect();
+        entries.sort_by(|a, b| rank(a.0).cmp(&rank(b.0)).then(a.1.cmp(b.1)));
         let mut out = "#include <string.h>\n".to_string();
-        for e in entries { out.push_str(e); }
+        for (_, e) in entries { out.push_str(e); }
         out
     }
 
@@ -2504,9 +2594,13 @@ impl Emitter {
                 // str-producing string ops allocate a new buffer…
                 (matches!(obj_ty, Type::Str)
                     && matches!(*m, "to_upper" | "to_lower" | "slice" | "trim" | "replace" | "char_at"))
-                // …as does TcpStream.read() (malloc'd const char*).
+                // …as does TcpStream.read() (malloc'd const char*)…
                 || (matches!(&obj_ty, Type::Named(n) if n == "TcpStream") && *m == "read")
+                // …and `int.to_str()` (heap decimal string).
+                || (*m == "to_str" && obj_ty.is_integer())
             }
+            // String concatenation allocates a fresh owned buffer.
+            Expr::BinOp(BinOp::Add, lhs, _) => matches!(self.get_expr(&lhs.node), Type::Str),
             _ => false,
         }
     }
@@ -2643,6 +2737,15 @@ impl Emitter {
         let key = format!("Struct_{name}");
         if self.named_collection_decls.borrow().contains_key(&key) { return; }
         let decl = format!("typedef struct {{\n{}}} {};\n", body, name);
+        self.named_collection_decls.borrow_mut().insert(key, decl);
+    }
+
+    /// Register a function-pointer typedef: `typedef R (*name)(A, B);`.
+    fn register_fn_type(&self, name: &str, ret_c: &str, arg_cs: &[String]) {
+        let key = format!("FnType_{name}");
+        if self.named_collection_decls.borrow().contains_key(&key) { return; }
+        let args = if arg_cs.is_empty() { "void".to_string() } else { arg_cs.join(", ") };
+        let decl = format!("typedef {} (*{})({});\n", ret_c, name, args);
         self.named_collection_decls.borrow_mut().insert(key, decl);
     }
 

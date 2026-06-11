@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use clap::ArgMatches;
 use chumsky::Parser;
 use chumsky::input::Input as _;
 use chumsky::span::SimpleSpan;
+use sirin_parser::aliases::resolve_aliases;
 use sirin_parser::parser::parser;
 use sirin_typechecker::checker::Checker;
 
@@ -18,7 +21,7 @@ pub fn execute(matches: &ArgMatches) {
     let tokens = sirin_parser::lex(&src);
     let eoi = SimpleSpan::from(src.len()..src.len());
 
-    let stmts = match parser().parse(tokens.as_slice().split_token_span(eoi)).into_result() {
+    let mut stmts = match parser().parse(tokens.as_slice().split_token_span(eoi)).into_result() {
         Ok(s) => s,
         Err(errors) => {
             for e in &errors {
@@ -27,6 +30,9 @@ pub fn execute(matches: &ArgMatches) {
             std::process::exit(1);
         }
     };
+
+    let mut alias_map = HashMap::new();
+    resolve_aliases(&mut stmts, &mut alias_map);
 
     let mut checker = Checker::new(&src);
     let mut had_error = false;

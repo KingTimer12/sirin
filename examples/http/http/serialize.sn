@@ -1,0 +1,37 @@
+use types
+
+// ── serialização da resposta ───────────────────────────────────────────────────
+
+fn status_text(code: int) -> str {
+    if (code == 200) { return "OK" }
+    if (code == 201) { return "Created" }
+    if (code == 204) { return "No Content" }
+    if (code == 400) { return "Bad Request" }
+    if (code == 401) { return "Unauthorized" }
+    if (code == 403) { return "Forbidden" }
+    if (code == 404) { return "Not Found" }
+    if (code == 405) { return "Method Not Allowed" }
+    if (code == 500) { return "Internal Server Error" }
+    return "Unknown"
+}
+
+// Recursão de cauda sobre o Map de cabeçalhos via `.keys_at(i)`.
+fn serialize_headers_at(headers: Map[str, str], i: int, acc: str) -> str {
+    key = headers.keys_at(i)
+    if Some(k) = key {
+        val = headers.get(k).unwrap_or("")
+        line = k + ": " + val + "\r\n"
+        return serialize_headers_at(headers, i + 1, acc + line)
+    }
+    return acc
+}
+
+fn serialize_headers(headers: Map[str, str]) -> str {
+    return serialize_headers_at(headers, 0, "")
+}
+
+fn serialize_response(res: Response) -> str {
+    line = "HTTP/1.1 " + res.status.to_str() + " " + status_text(res.status) + "\r\n"
+    head = serialize_headers(res.headers)
+    return line + head + "\r\n" + res.body
+}

@@ -72,35 +72,51 @@ pub fn parser<'a>()
         .then(ty_atom_or_named.clone())
         .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket));
 
-    // Anonymous struct type annotation: { idade: int, nome: str }
-    // Fields kept sorted by name for structural identity (matches literal inference).
-    let struct_ty = ident_name
-        .clone()
-        .then_ignore(just(Tokens::Colon))
-        .then(ty_atom_or_named.clone())
-        .separated_by(just(Tokens::Comma))
-        .at_least(1)
-        .allow_trailing()
-        .collect::<Vec<_>>()
-        .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd))
-        .map(|fields: Vec<(&str, Type)>| {
-            let mut tys: Vec<(String, Type)> =
-                fields.into_iter().map(|(n, t)| (n.to_string(), t)).collect();
-            tys.sort_by(|a, b| a.0.cmp(&b.0));
-            Type::Struct(tys)
-        })
-        .boxed();
-
     // Type grammar. Recursive so the `Option[..]`/`Try[..]` long forms can nest
     // arbitrarily (`Try[int?]`, `Option[Try[int]]`). Collection brackets stay shallow.
     // Named is the fallback for user-defined class types (any remaining Ident).
     let ty = recursive(|ty| {
         // Recursive inner — used only by Option[..]/Try[..] so they accept any type.
         let nest = ty
+            .clone()
             .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket))
             .boxed();
 
+        // Anonymous struct type annotation: { idade: int, nome: str }. Field types are
+        // the full recursive `ty`, so `{ headers: Map[str, str] }` is allowed. Fields
+        // kept sorted by name for structural identity (matches literal inference).
+        let struct_ty = ident_name
+            .clone()
+            .then_ignore(just(Tokens::Colon))
+            .then(ty.clone())
+            .separated_by(just(Tokens::Comma))
+            .at_least(1)
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd))
+            .map(|fields: Vec<(&str, Type)>| {
+                let mut tys: Vec<(String, Type)> =
+                    fields.into_iter().map(|(n, t)| (n.to_string(), t)).collect();
+                tys.sort_by(|a, b| a.0.cmp(&b.0));
+                Type::Struct(tys)
+            })
+            .boxed();
+
+        // Function type: `fn(T1, T2) -> R` — first-class handler/callback values.
+        let func_ty = just(Tokens::Fn)
+            .ignore_then(
+                ty.clone()
+                    .separated_by(just(Tokens::Comma))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen)),
+            )
+            .then_ignore(just(Tokens::Arrow))
+            .then(ty.clone())
+            .map(|(args, ret)| Type::Func(args, Box::new(ret)))
+            .boxed();
+
         let core = choice((
+            func_ty,
             struct_ty,
             just(Tokens::ArrayType)
                 .ignore_then(bracket.clone())
@@ -880,6 +896,15 @@ pub fn parser<'a>()
             just(Tokens::Spawn).to("spawn"),
             just(Tokens::Await).to("await"),
         ));
+        // `type Name = <Type>` — structural type alias.
+        let type_alias = just(Tokens::TypeKw)
+            .ignore_then(spanned_name.clone())
+            .then_ignore(just(Tokens::Assign))
+            .then(ty.clone())
+            .map_with(|(name, ty), extra| {
+                Spanned::new(Stmt::TypeAlias { name, ty }, sp(extra.span()))
+            });
+
         let use_stmt = just(Tokens::Use)
             .ignore_then(use_segment.clone())
             .then(
@@ -910,6 +935,7 @@ pub fn parser<'a>()
             .or(interface_stmt)
             .or(impl_stmt)
             .or(use_stmt)
+            .or(type_alias)
             .or(expr
                 .clone()
                 .map_with(|e, extra| Spanned::new(Stmt::Expr(e), sp(extra.span()))))

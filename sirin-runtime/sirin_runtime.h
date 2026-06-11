@@ -19,6 +19,8 @@ int      sirin_str_eq(SirinStr a, SirinStr b);
 /* ── str ops on plain const char* (the language `str` type) ───────────────── */
 const char* sirin_str_clone(const char* s);   /* deep copy — backs `:=` clone   */
 void        sirin_cstr_free(const char* s);   /* free an owned heap str (Drop)  */
+const char* sirin_str_concat(const char* a, const char* b); /* backs `str + str` */
+const char* sirin_int_to_str(int64_t n);      /* backs `int.to_str()`            */
 int64_t     sirin_str_len(const char* s);
 const char* sirin_str_char_at(const char* s, int64_t i);
 const char* sirin_str_slice(const char* s, int64_t start, int64_t end);
@@ -190,6 +192,9 @@ typedef struct { char** keys; int64_t*     vals; size_t len; size_t cap; } Sirin
 SirinMapStrInt  sirin_map_str_int_new(void);
 void            sirin_map_str_int_insert(SirinMapStrInt* m, const char* key, int64_t value);
 int64_t         sirin_map_str_int_get(SirinMapStrInt* m, const char* key);
+int64_t*        sirin_map_str_int_get_opt(SirinMapStrInt* m, const char* key);
+int64_t         sirin_map_str_int_len(SirinMapStrInt* m);
+const char**    sirin_map_str_int_key_at(SirinMapStrInt* m, int64_t i);
 void            sirin_map_str_int_free(SirinMapStrInt* m);
 #endif
 
@@ -198,6 +203,9 @@ typedef struct { char** keys; SirinCStr*   vals; size_t len; size_t cap; } Sirin
 SirinMapStrStr  sirin_map_str_str_new(void);
 void            sirin_map_str_str_insert(SirinMapStrStr* m, const char* key, SirinCStr value);
 SirinCStr       sirin_map_str_str_get(SirinMapStrStr* m, const char* key);
+SirinCStr*      sirin_map_str_str_get_opt(SirinMapStrStr* m, const char* key);
+int64_t         sirin_map_str_str_len(SirinMapStrStr* m);
+const char**    sirin_map_str_str_key_at(SirinMapStrStr* m, int64_t i);
 void            sirin_map_str_str_free(SirinMapStrStr* m);
 #endif
 
@@ -206,6 +214,9 @@ typedef struct { char** keys; double*      vals; size_t len; size_t cap; } Sirin
 SirinMapStrFloat sirin_map_str_float_new(void);
 void             sirin_map_str_float_insert(SirinMapStrFloat* m, const char* key, double value);
 double           sirin_map_str_float_get(SirinMapStrFloat* m, const char* key);
+double*          sirin_map_str_float_get_opt(SirinMapStrFloat* m, const char* key);
+int64_t          sirin_map_str_float_len(SirinMapStrFloat* m);
+const char**     sirin_map_str_float_key_at(SirinMapStrFloat* m, int64_t i);
 void             sirin_map_str_float_free(SirinMapStrFloat* m);
 #endif
 

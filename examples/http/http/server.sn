@@ -1,0 +1,29 @@
+use sirin.net
+use sirin.async
+use types
+use transport
+
+// ── handler e servidor ──────────────────────────────────────────────────────────
+
+async fn handle_conn(conn: TcpStream, handler: fn(Request) -> Response) {
+    if Ok(req) = read_request(conn) {
+        res = handler(req)
+        send_response(conn, res)
+    } else {
+        empty: Map[str, str] = Map()
+        bad: Response = { status: 400, headers: empty, body: "bad request" }
+        send_response(conn, bad)
+    }
+    conn.close()
+}
+
+async fn accept_loop(l: TcpListener, handler: fn(Request) -> Response) {
+    conn = l.accept().await
+    spawn handle_conn(conn, handler)
+    return accept_loop(l, handler)
+}
+
+fn serve(host: str, port: int, handler: fn(Request) -> Response) {
+    listener = TcpListener(host, port)
+    spawn accept_loop(listener, handler)
+}

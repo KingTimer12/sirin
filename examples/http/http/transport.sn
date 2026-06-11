@@ -1,0 +1,19 @@
+use sirin.net
+use types
+use parse
+use serialize
+
+// ── envio / recebimento ────────────────────────────────────────────────────────
+
+fn send_response(conn: TcpStream, res: Response) {
+    raw = serialize_response(res)
+    conn.write(raw)
+}
+
+fn read_request(conn: TcpStream) -> Request! {
+    raw = conn.read()
+    if (raw.len() == 0) {
+        return Err("conexão fechada")
+    }
+    return parse_request(raw)
+}

@@ -1,0 +1,14 @@
+// Tipos compartilhados do HTTP. Apelidos de struct anônimo (estruturais).
+
+type Request = {
+    method:  str,
+    path:    str,
+    headers: Map[str, str],
+    body:    str
+}
+
+type Response = {
+    status:  int,
+    headers: Map[str, str],
+    body:    str
+}

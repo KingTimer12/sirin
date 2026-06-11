@@ -47,6 +47,9 @@ pub struct Checker<'a> {
     imported_modules: HashSet<String>,
     /// return types of functions declared in imported local modules
     fns: HashMap<String, sirin_parser::types::Type>,
+    /// full signatures (`fn(args) -> ret`) so a bare function name used as a value
+    /// resolves to a `Type::Func`
+    fn_sigs: HashMap<String, sirin_parser::types::Type>,
     /// names of private (_-prefixed) functions from imported modules
     module_private_fns: HashSet<String>,
     /// names of functions declared `async fn` — only these may be `.await`ed
@@ -68,6 +71,7 @@ impl<'a> Checker<'a> {
             primitive_impls: HashMap::new(),
             imported_modules: HashSet::new(),
             fns: HashMap::new(),
+            fn_sigs: HashMap::new(),
             module_private_fns: HashSet::new(),
             async_fns: HashSet::new(),
             in_async_ctx: false,
@@ -80,12 +84,17 @@ impl<'a> Checker<'a> {
     pub fn import_module(&mut self, stmts: &[Spanned<Stmt<'_>>]) {
         for s in stmts {
             match &s.node {
-                Stmt::Fn { name, return_type, async_, .. } => {
+                Stmt::Fn { name, args, return_type, async_, .. } => {
                     let fn_name = name.node.to_string();
                     if *async_ { self.async_fns.insert(fn_name.clone()); }
+                    let sig = Type::Func(
+                        args.iter().map(|(_, t)| t.clone()).collect(),
+                        Box::new(return_type.clone().unwrap_or(Type::Void)),
+                    );
                     if fn_name.starts_with('_') {
                         self.module_private_fns.insert(fn_name);
                     } else {
+                        self.fn_sigs.insert(fn_name.clone(), sig);
                         self.fns.insert(fn_name, return_type.clone().unwrap_or(Type::Void));
                     }
                 }
@@ -176,6 +185,19 @@ impl<'a> Checker<'a> {
             (Type::Try(d), Type::Try(g)) => {
                 **d == Type::Void || **g == Type::Void || Self::type_compatible(d, g)
             }
+            (Type::Func(da, dr), Type::Func(ga, gr)) => {
+                da.len() == ga.len()
+                    && da.iter().zip(ga).all(|(d, g)| Self::type_compatible(d, g))
+                    && Self::type_compatible(dr, gr)
+            }
+            // Structural: same field names, each field compatible. A `Void` field (e.g.
+            // an empty `Map()` whose element type can't be inferred) acts as a wildcard.
+            (Type::Struct(d), Type::Struct(g)) => {
+                d.len() == g.len()
+                    && d.iter().zip(g).all(|((dn, dt), (gn, gt))| {
+                        dn == gn && (*gt == Type::Void || Self::type_compatible(dt, gt))
+                    })
+            }
             _ => false,
         }
     }
@@ -244,6 +266,13 @@ impl<'a> Checker<'a> {
                 self.fns.insert(
                     fn_decl_name.node.to_string(),
                     return_type.clone().unwrap_or(Type::Void),
+                );
+                self.fn_sigs.insert(
+                    fn_decl_name.node.to_string(),
+                    Type::Func(
+                        args.iter().map(|(_, t)| t.clone()).collect(),
+                        Box::new(return_type.clone().unwrap_or(Type::Void)),
+                    ),
                 );
                 self.env.push_scope();
 
@@ -696,16 +725,21 @@ impl<'a> Checker<'a> {
                         return Err(CheckerError::UseAfterMove { var: name, moved_to });
                     }
                 }
-                self.env.get(name).cloned().ok_or_else(|| {
-                    report_error(
-                        &expr.span.file,
-                        self.src,
-                        &expr.span,
-                        "undeclared variable",
-                        &format!("`{}` is not declared in this scope", name),
-                    );
-                    CheckerError::NameError(name)
-                })
+                if let Some(t) = self.env.get(name).cloned() {
+                    return Ok(t);
+                }
+                // A bare function name used as a value resolves to its `fn(..) -> R` type.
+                if let Some(sig) = self.fn_sigs.get(*name) {
+                    return Ok(sig.clone());
+                }
+                report_error(
+                    &expr.span.file,
+                    self.src,
+                    &expr.span,
+                    "undeclared variable",
+                    &format!("`{}` is not declared in this scope", name),
+                );
+                Err(CheckerError::NameError(name))
             }
             Expr::Await(inner) => {
                 // `.await` is only valid inside an async fn or a spawn block (a
@@ -787,6 +821,10 @@ impl<'a> Checker<'a> {
                     // Args are borrowed (read), not moved — aggregation model. Checking
                     // them still catches use-after-move reads.
                     for arg in args { self.check_expr(arg)?; }
+                    // Calling through a function-typed local/param (e.g. a handler).
+                    if let Some(Type::Func(_, ret)) = self.env.get(name) {
+                        return Ok((**ret).clone());
+                    }
                     if self.module_private_fns.contains(*name) {
                         return Err(CheckerError::PrivateAccess {
                             name: name.to_string(),
@@ -888,7 +926,7 @@ impl<'a> Checker<'a> {
                         }
                     },
                     Type::Map(key_ty, val_ty) => match *method {
-                        "insert" => {
+                        "insert" | "set" => {
                             if let Some(k) = args.first() {
                                 let got = self.check_expr(k)?;
                                 if got != Type::Void && got != **key_ty
@@ -932,11 +970,30 @@ impl<'a> Checker<'a> {
                                     return Err(CheckerError::TypeError(*key_ty.clone(), got));
                                 }
                             }
-                            Ok(*val_ty.clone())
+                            // Lookup may miss → optional value.
+                            Ok(Type::Nullable(val_ty.clone()))
+                        }
+                        "len" => {
+                            for arg in args { self.check_expr(arg)?; }
+                            Ok(Type::Int)
+                        }
+                        "keys_at" => {
+                            if let Some(i) = args.first() {
+                                let got = self.check_expr(i)?;
+                                if got != Type::Void && !got.is_integer() {
+                                    report_error(
+                                        &i.span.file, self.src, &i.span,
+                                        "wrong index type",
+                                        &format!("`keys_at` takes an integer index; found `{:?}`", got),
+                                    );
+                                    return Err(CheckerError::TypeError(Type::Int, got));
+                                }
+                            }
+                            Ok(Type::Nullable(Box::new(Type::Str)))
                         }
                         _ => {
                             for arg in args { self.check_expr(arg)?; }
-                            Ok(*val_ty.clone())
+                            Ok(Type::Nullable(val_ty.clone()))
                         }
                     },
                     Type::Set(inner) => match *method {

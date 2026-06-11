@@ -29,6 +29,8 @@ pub enum Type {
     Struct(Vec<(String, Type)>),
     // async channel
     Channel(Box<Type>),
+    // first-class function value: `fn(T1, T2) -> R`
+    Func(Vec<Type>, Box<Type>),
 }
 
 impl Type {

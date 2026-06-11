@@ -117,4 +117,9 @@ pub enum Stmt<'a> {
     Use {
         path: Vec<&'a str>,
     },
+    // `type Name = <Type>` — a structural alias resolved away before checking.
+    TypeAlias {
+        name: Spanned<&'a str>,
+        ty: Type,
+    },
 }

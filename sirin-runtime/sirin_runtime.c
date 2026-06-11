@@ -72,6 +72,26 @@ const char* sirin_str_clone(const char* s) { return sirin__dup(s, strlen(s)); }
 
 void sirin_cstr_free(const char* s) { free((void*)s); }
 
+/* Concatenate two strings into a fresh heap buffer (backs `str + str`). */
+const char* sirin_str_concat(const char* a, const char* b) {
+    size_t la = strlen(a), lb = strlen(b);
+    char* out = (char*)sirin_alloc(la + lb + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    out[la + lb] = '\0';
+    return out;
+}
+
+/* Decimal rendering of an integer into a fresh heap buffer (backs `int.to_str()`). */
+const char* sirin_int_to_str(int64_t n) {
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%lld", (long long)n);
+    char* out = (char*)sirin_alloc((size_t)len + 1);
+    memcpy(out, buf, (size_t)len);
+    out[len] = '\0';
+    return out;
+}
+
 int64_t sirin_str_len(const char* s) { return (int64_t)strlen(s); }
 
 const char* sirin_str_char_at(const char* s, int64_t i) {
@@ -432,6 +452,21 @@ ValCType sirin_map_str_##FuncName##_get(SirinMapStr##TypeName* m, const char* ke
     }                                                                              \
     fprintf(stderr, "sirin runtime: map key not found: \"%s\"\n", key);           \
     exit(1);                                                                       \
+}                                                                                  \
+ValCType* sirin_map_str_##FuncName##_get_opt(SirinMapStr##TypeName* m,            \
+                                             const char* key) {                    \
+    for (size_t i = 0; i < m->len; i++) {                                         \
+        if (strcmp(m->keys[i], key) == 0) return &m->vals[i];                     \
+    }                                                                              \
+    return NULL;                                                                   \
+}                                                                                  \
+int64_t sirin_map_str_##FuncName##_len(SirinMapStr##TypeName* m) {                \
+    return (int64_t)m->len;                                                        \
+}                                                                                  \
+const char** sirin_map_str_##FuncName##_key_at(SirinMapStr##TypeName* m,          \
+                                               int64_t i) {                        \
+    if (i < 0 || (size_t)i >= m->len) return NULL;                                \
+    return (const char**)&m->keys[i];                                             \
 }                                                                                  \
 void sirin_map_str_##FuncName##_free(SirinMapStr##TypeName* m) {                  \
     for (size_t i = 0; i < m->len; i++) free(m->keys[i]);                         \

@@ -99,6 +99,8 @@ pub enum Tokens<'a> {
     SelfKw,
     #[token("use")]
     Use,
+    #[token("type")]
+    TypeKw,
 
     // Function tokens
     #[token("fn")]

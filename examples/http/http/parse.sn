@@ -1,0 +1,73 @@
+use types
+
+// ── parsing da requisição ─────────────────────────────────────────────────────
+
+fn parse_request_line(line: str) -> { method: str, path: str }! {
+    parts = line.split(" ")
+    if (parts.len() < 2) {
+        return Err("linha de requisição malformada")
+    }
+    method = parts.get(0)
+    path = parts.get(1)
+    return Ok({ method: method, path: path })
+}
+
+// Recursão de cauda sobre as linhas: cada linha não vazia é `Chave: Valor`;
+// a primeira linha vazia separa cabeçalhos do corpo e encerra a varredura.
+fn parse_headers_at(lines: Vec[str], i: int, acc: Map[str, str]) -> Map[str, str] {
+    if (i >= lines.len()) {
+        return acc
+    }
+    line = lines.get(i)
+    if (line.len() == 0) {
+        return acc
+    }
+    sep = line.index_of(": ")
+    if (sep >= 0) {
+        key = line.slice(0, sep)
+        val = line.slice(sep + 2, line.len())
+        acc.set(key, val)
+    }
+    return parse_headers_at(lines, i + 1, acc)
+}
+
+// Índice da primeira linha do corpo (logo após a linha vazia).
+fn find_body_start(lines: Vec[str], i: int) -> int {
+    if (i >= lines.len()) {
+        return i
+    }
+    line = lines.get(i)
+    if (line.len() == 0) {
+        return i + 1
+    }
+    return find_body_start(lines, i + 1)
+}
+
+// Junta as linhas restantes do corpo de volta com "\r\n".
+fn join_body_at(lines: Vec[str], i: int, acc: str) -> str {
+    if (i >= lines.len()) {
+        return acc
+    }
+    line = lines.get(i)
+    if (acc.len() == 0) {
+        return join_body_at(lines, i + 1, acc + line)
+    }
+    return join_body_at(lines, i + 1, acc + "\r\n" + line)
+}
+
+fn parse_request(raw: str) -> Request! {
+    lines = raw.split("\r\n")
+    if (lines.len() == 0) {
+        return Err("requisição vazia")
+    }
+    first = lines.get(0)
+    rl ?= parse_request_line(first)
+
+    empty: Map[str, str] = Map()
+    headers = parse_headers_at(lines, 1, empty)
+
+    start = find_body_start(lines, 1)
+    body = join_body_at(lines, start, "")
+
+    return Ok({ method: rl.method, path: rl.path, headers: headers, body: body })
+}

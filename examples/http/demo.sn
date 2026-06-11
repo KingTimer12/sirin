@@ -1,0 +1,20 @@
+use sirin.io
+use sirin.net
+use sirin.async
+use http
+
+fn route(req: Request) -> Response {
+    if (req.path == "/") {
+        ok: Map[str, str] = Map()
+        ok.set("Content-Type", "text/plain")
+        return { status: 200, headers: ok, body: "hello from sirin" }
+    }
+    nf: Map[str, str] = Map()
+    nf.set("Content-Type", "text/plain")
+    return { status: 404, headers: nf, body: "not found" }
+}
+
+fn main() {
+  serve("127.0.0.1", 8080, route)
+  println("ouvindo em http://127.0.0.1:8080")
+}
