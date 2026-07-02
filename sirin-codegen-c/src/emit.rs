@@ -1128,6 +1128,26 @@ impl Emitter {
                     }
                 }
 
+                // Object literal against a declared struct type: emit each field with
+                // its DECLARED type so an empty `Map()`/`Vec()` field gets the right
+                // typed constructor instead of the int fallback.
+                if let (Expr::ObjectLiteral(fields), Type::Struct(ftys)) = (&rhs.node, ty) {
+                    let cty = self.type_to_c(ty);
+                    let inits = fields.iter()
+                        .map(|(fname, fval)| {
+                            let target = ftys.iter()
+                                .find(|(n, _)| n == fname)
+                                .map(|(_, t)| t.clone())
+                                .unwrap_or(Type::Void);
+                            format!(".{} = {}", fname, self.emit_expr_typed(&target, &fval.node))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.vars.insert(name.node.to_string(), ty.clone());
+                    self.output.push_str(&format!("{} = ({}){{ {} }};\n", lhs, cty, inits));
+                    return;
+                }
+
                 // `Ok`/`Err` typed against the declared `T!` so the C struct matches.
                 let mut value = self
                     .emit_try_ctor(ty, &rhs.node)
@@ -2381,6 +2401,44 @@ impl Emitter {
         }
     }
 
+    /// Emit `e` against a known target type: collection constructors pick the
+    /// typed runtime ctor, `Ok`/`Err` pick the target `Try[T]` struct; anything
+    /// else falls back to the plain emit.
+    fn emit_expr_typed(&self, target: &Type, e: &Expr<'_>) -> String {
+        if let Some(s) = self.emit_try_ctor(target, e) {
+            return s;
+        }
+        if let Expr::Call(ctor, args) = e {
+            let cap = || args.first()
+                .map(|a| self.emit_expr(&a.node))
+                .unwrap_or_else(|| "4".to_string());
+            match (*ctor, target) {
+                ("Vec", Type::Vec(inner)) => {
+                    let (_, s) = collection_suffix_for(inner);
+                    let _ = self.type_to_c(target); // registers defines/decls
+                    return format!("sirin_vec_{}_new({})", s, cap());
+                }
+                ("Array", Type::Array(inner)) => {
+                    let (_, s) = collection_suffix_for(inner);
+                    let _ = self.type_to_c(target);
+                    return format!("sirin_array_{}_new({})", s, cap());
+                }
+                ("Map", Type::Map(_, val)) => {
+                    let (_, vs) = collection_suffix_for(val);
+                    let _ = self.type_to_c(target);
+                    return format!("sirin_map_str_{}_new()", vs);
+                }
+                ("Set", Type::Set(inner)) => {
+                    let (_, s) = collection_suffix_for(inner);
+                    let _ = self.type_to_c(target);
+                    return format!("sirin_set_{}_new()", s);
+                }
+                _ => {}
+            }
+        }
+        self.emit_expr(e)
+    }
+
     /// Emit a return/let value, typing `Ok`/`Err` against the current return type.
     fn emit_ret_value(&self, v: &Expr<'_>) -> String {
         if let Some(rt) = &self.current_ret {
@@ -2974,8 +3032,35 @@ impl Emitter {
                     self.output.push_str(&format!(
                         "{}sirin_cstr_free({});\n", self.indent(), name.node));
                 }
+                // Heap collections built by a constructor are freed on fall-through.
+                // Only copy-element collections: freeing a str-valued one could
+                // dangle strings that were read out of it earlier.
+                if let Some(free) = self.collection_free_call(&s.node) {
+                    self.output.push_str(&format!("{}{}\n", self.indent(), free));
+                }
             }
         }
+    }
+
+    /// `sirin_*_free(&name);` for a local that owns a heap collection built by a
+    /// `Vec()/Map()/Set()/Array()` constructor with a declared copy-element type.
+    /// None for anything else (str-valued collections stay leaked-but-safe).
+    fn collection_free_call<'a>(&self, s: &Stmt<'a>) -> Option<String> {
+        let (Stmt::Let { name, ty: Some(ty), rhs } | Stmt::CopyLet { name, ty: Some(ty), rhs }) = s
+        else { return None; };
+        let Expr::Call(ctor, _) = &rhs.node else { return None; };
+        let call = match (*ctor, ty) {
+            ("Vec", Type::Vec(i)) if i.is_copy() =>
+                format!("sirin_vec_{}_free(&{});", collection_suffix_for(i).1, name.node),
+            ("Array", Type::Array(i)) if i.is_copy() =>
+                format!("sirin_array_{}_free(&{});", collection_suffix_for(i).1, name.node),
+            ("Set", Type::Set(i)) if i.is_copy() =>
+                format!("sirin_set_{}_free(&{});", collection_suffix_for(i).1, name.node),
+            ("Map", Type::Map(_, v)) if v.is_copy() =>
+                format!("sirin_map_str_{}_free(&{});", collection_suffix_for(v).1, name.node),
+            _ => return None,
+        };
+        Some(call)
     }
 
     /// Register the monomorphized `Try[T]` tagged struct: `{ ok, value, err }`.
