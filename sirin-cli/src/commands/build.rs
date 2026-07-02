@@ -24,27 +24,48 @@ fn file_kb(path: &std::path::Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|m| (m.len() + 512) / 1024)
 }
 
+/// Result of a successful build: the produced binary and every `.sn` file that
+/// went into it (main + transitive local modules) — the watch set for `--watch`.
+pub struct BuildResult {
+    pub out_path: PathBuf,
+    pub sources: Vec<PathBuf>,
+}
+
 pub fn execute(matches: &ArgMatches) {
     let path = matches.get_one::<String>("file").unwrap();
-    if !path.ends_with(".sn") {
-        eprintln!("error: expected a `.sn` source file, got `{}`", path);
-        std::process::exit(1);
-    }
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read `{}`: {}", path, e);
-            std::process::exit(1);
-        }
-    };
+    let out_path = std::path::Path::new(path)
+        .with_extension(if cfg!(windows) { "exe" } else { "" });
+    let size_before = file_kb(&out_path);
 
-    let main_path = match PathBuf::from(path).canonicalize() {
-        Ok(p) => p,
+    match try_build(path) {
+        Ok(res) => {
+            let size_after = file_kb(&res.out_path).unwrap_or(0);
+            println!("{}", res.out_path.display());
+            match size_before {
+                Some(before) => println!("tamanho: {}KB → {}KB", before, size_after),
+                None         => println!("tamanho: {}KB", size_after),
+            }
+        }
         Err(e) => {
-            eprintln!("error: {}", e);
+            eprintln!("{}", e);
             std::process::exit(1);
         }
-    };
+    }
+}
+
+/// Full pipeline (parse → resolve modules → typecheck → emit C → cc) with no
+/// process exits, so `run --watch` can keep going after a failed rebuild.
+/// Diagnostics still print to stderr as they are found; the Err is a summary.
+pub fn try_build(path: &str) -> Result<BuildResult, String> {
+    if !path.ends_with(".sn") {
+        return Err(format!("error: expected a `.sn` source file, got `{}`", path));
+    }
+    let src = std::fs::read_to_string(path)
+        .map_err(|e| format!("error: cannot read `{}`: {}", path, e))?;
+
+    let main_path = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|e| format!("error: {}", e))?;
 
     // Parse main (tokens + stmts share scope — no lifetime escape)
     let tokens = sirin_parser::lex(&src);
@@ -53,7 +74,7 @@ pub fn execute(matches: &ArgMatches) {
         Ok(s) => s,
         Err(errors) => {
             for e in &errors { eprintln!("parse error: {:?}", e); }
-            std::process::exit(1);
+            return Err("build failed: parse error".to_string());
         }
     };
 
@@ -71,15 +92,11 @@ pub fn execute(matches: &ArgMatches) {
             let refs: Vec<&str> = use_path.iter().copied().collect();
             match resolve(&refs, &main_path) {
                 Ok(ModuleSource::Local(dep_path)) => {
-                    if let Err(e) = collect_modules(
-                        &dep_path, &mut dep_stack, &mut dep_visited, &mut ordered,
-                    ) {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
+                    collect_modules(&dep_path, &mut dep_stack, &mut dep_visited, &mut ordered)
+                        .map_err(|e| format!("error: {}", e))?;
                 }
                 Ok(ModuleSource::Stdlib) => {}
-                Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
+                Err(e) => return Err(format!("error: {}", e)),
             }
         }
     }
@@ -109,7 +126,7 @@ pub fn execute(matches: &ArgMatches) {
             Ok(s) => s,
             Err(errors) => {
                 for e in &errors { eprintln!("parse error in {}: {:?}", mod_path.display(), e); }
-                std::process::exit(1);
+                return Err(format!("build failed: parse error in {}", mod_path.display()));
             }
         };
 
@@ -129,6 +146,7 @@ pub fn execute(matches: &ArgMatches) {
         all_exports.fns.extend(exports.fns);
         all_exports.classes.extend(exports.classes);
         all_exports.class_methods.extend(exports.class_methods);
+        all_exports.enums.extend(exports.enums);
         for (k, v) in exports.prim_methods {
             all_exports.prim_methods.entry(k).or_default().extend(v);
         }
@@ -148,12 +166,13 @@ pub fn execute(matches: &ArgMatches) {
             had_error = true;
         }
     }
-    if had_error { std::process::exit(1); }
+    if had_error {
+        return Err("build failed: type error".to_string());
+    }
 
     // ── Emit ──────────────────────────────────────────────────────────────────
     let out_path = std::path::Path::new(path)
         .with_extension(if cfg!(windows) { "exe" } else { "" });
-    let size_before = file_kb(&out_path);
 
     let mut main_emitter = Emitter::new();
     main_emitter.absorb_exports(&all_exports);
@@ -178,21 +197,18 @@ pub fn execute(matches: &ArgMatches) {
     let out_str = out_path.to_string_lossy().into_owned();
 
     #[cfg(not(windows))]
-    compile_unix(&c_src, &defines_prefix, &out_str, net_imported);
+    compile_unix(&c_src, &defines_prefix, &out_str, net_imported)?;
 
     #[cfg(windows)]
-    compile_windows(&c_src, &defines_prefix, &out_str, net_imported);
+    compile_windows(&c_src, &defines_prefix, &out_str, net_imported)?;
 
-    let size_after = file_kb(&out_path).unwrap_or(0);
-    println!("{}", out_str);
-    match size_before {
-        Some(before) => println!("tamanho: {}KB → {}KB", before, size_after),
-        None         => println!("tamanho: {}KB", size_after),
-    }
+    let mut sources = vec![main_path];
+    sources.extend(ordered.iter().map(|(p, _)| p.clone()));
+    Ok(BuildResult { out_path, sources })
 }
 
 #[cfg(not(windows))]
-fn compile_unix(c_src: &str, defines_prefix: &str, out: &str, net_imported: bool) {
+fn compile_unix(c_src: &str, defines_prefix: &str, out: &str, net_imported: bool) -> Result<(), String> {
     let tmp = std::env::temp_dir();
     let h_path    = tmp.join("sirin_runtime.h");
     let c_rt      = tmp.join("sirin_runtime.c");
@@ -202,37 +218,23 @@ fn compile_unix(c_src: &str, defines_prefix: &str, out: &str, net_imported: bool
     let c_net     = tmp.join("sirin_net.c");
     let c_prog    = tmp.join("sirin_program.c");
 
-    if let Err(e) = std::fs::write(&h_path, runtime::RUNTIME_H) {
-        eprintln!("error: cannot write runtime header: {}", e);
-        std::process::exit(1);
-    }
+    std::fs::write(&h_path, runtime::RUNTIME_H)
+        .map_err(|e| format!("error: cannot write runtime header: {}", e))?;
     let runtime_with_defines = format!("{}{}", defines_prefix, runtime::RUNTIME_C);
-    if let Err(e) = std::fs::write(&c_rt, &runtime_with_defines) {
-        eprintln!("error: cannot write runtime source: {}", e);
-        std::process::exit(1);
-    }
-    if let Err(e) = std::fs::write(&c_async_h, runtime::ASYNC_H) {
-        eprintln!("error: cannot write async header: {}", e);
-        std::process::exit(1);
-    }
-    if let Err(e) = std::fs::write(&c_async, runtime::ASYNC_C) {
-        eprintln!("error: cannot write async source: {}", e);
-        std::process::exit(1);
-    }
+    std::fs::write(&c_rt, &runtime_with_defines)
+        .map_err(|e| format!("error: cannot write runtime source: {}", e))?;
+    std::fs::write(&c_async_h, runtime::ASYNC_H)
+        .map_err(|e| format!("error: cannot write async header: {}", e))?;
+    std::fs::write(&c_async, runtime::ASYNC_C)
+        .map_err(|e| format!("error: cannot write async source: {}", e))?;
     if net_imported {
-        if let Err(e) = std::fs::write(&c_net_h, runtime::NET_H) {
-            eprintln!("error: cannot write net header: {}", e);
-            std::process::exit(1);
-        }
-        if let Err(e) = std::fs::write(&c_net, runtime::NET_C) {
-            eprintln!("error: cannot write net source: {}", e);
-            std::process::exit(1);
-        }
+        std::fs::write(&c_net_h, runtime::NET_H)
+            .map_err(|e| format!("error: cannot write net header: {}", e))?;
+        std::fs::write(&c_net, runtime::NET_C)
+            .map_err(|e| format!("error: cannot write net source: {}", e))?;
     }
-    if let Err(e) = std::fs::write(&c_prog, c_src) {
-        eprintln!("error: cannot write program source: {}", e);
-        std::process::exit(1);
-    }
+    std::fs::write(&c_prog, c_src)
+        .map_err(|e| format!("error: cannot write program source: {}", e))?;
 
     let compiler = ["cc", "clang", "gcc"]
         .iter()
@@ -260,66 +262,38 @@ fn compile_unix(c_src: &str, defines_prefix: &str, out: &str, net_imported: bool
         .status();
 
     match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => { eprintln!("compile error: compiler exited with {}", s); std::process::exit(1); }
-        Err(e) => { eprintln!("compile error: cannot run compiler: {}", e); std::process::exit(1); }
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("compile error: compiler exited with {}", s)),
+        Err(e) => Err(format!("compile error: cannot run compiler: {}", e)),
     }
 }
 
 #[cfg(windows)]
-fn compile_windows(c_src: &str, defines_prefix: &str, out: &str, _net_imported: bool) {
-    let tcc = match Tcc::new() {
-        Ok(t) => t,
-        Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
-    };
+fn compile_windows(c_src: &str, defines_prefix: &str, out: &str, _net_imported: bool) -> Result<(), String> {
+    let tcc = Tcc::new().map_err(|e| format!("error: {}", e))?;
 
     tcc.set_lib_path(TCC_WIN32_DIR);
-    if let Err(e) = tcc.add_library_path(TCC_RUNTIME_DIR) {
-        eprintln!("tcc error: {}", e); std::process::exit(1);
-    }
-    if let Err(e) = tcc.add_include_path(&format!("{}/include", TCC_DIR)) {
-        eprintln!("tcc error: {}", e); std::process::exit(1);
-    }
-    if let Err(e) = tcc.add_include_path(&format!("{}/include", TCC_WIN32_DIR)) {
-        eprintln!("tcc error: {}", e); std::process::exit(1);
-    }
-    if let Err(e) = tcc.add_include_path(&format!("{}/include/winapi", TCC_WIN32_DIR)) {
-        eprintln!("tcc error: {}", e); std::process::exit(1);
-    }
+    tcc.add_library_path(TCC_RUNTIME_DIR).map_err(|e| format!("tcc error: {}", e))?;
+    tcc.add_include_path(&format!("{}/include", TCC_DIR)).map_err(|e| format!("tcc error: {}", e))?;
+    tcc.add_include_path(&format!("{}/include", TCC_WIN32_DIR)).map_err(|e| format!("tcc error: {}", e))?;
+    tcc.add_include_path(&format!("{}/include/winapi", TCC_WIN32_DIR)).map_err(|e| format!("tcc error: {}", e))?;
 
     let tmp = std::env::temp_dir();
-    if let Err(e) = std::fs::write(tmp.join("sirin_runtime.h"), runtime::RUNTIME_H) {
-        eprintln!("error: cannot write runtime header to temp: {}", e);
-        std::process::exit(1);
-    }
+    std::fs::write(tmp.join("sirin_runtime.h"), runtime::RUNTIME_H)
+        .map_err(|e| format!("error: cannot write runtime header to temp: {}", e))?;
     let tmp_fwd = tmp.to_string_lossy().replace('\\', "/");
-    if let Err(e) = tcc.add_include_path(&tmp_fwd) {
-        eprintln!("tcc error: {}", e); std::process::exit(1);
-    }
+    tcc.add_include_path(&tmp_fwd).map_err(|e| format!("tcc error: {}", e))?;
 
-    if let Err(e) = tcc.set_output_type(TCC_OUTPUT_EXE) {
-        eprintln!("tcc error: {}", e); std::process::exit(1);
-    }
-    if let Err(e) = tcc.set_options("-s") {
-        eprintln!("tcc error: {}", e); std::process::exit(1);
-    }
-    if let Err(e) = tcc.set_options("-Os") {
-        eprintln!("tcc error: {}", e); std::process::exit(1);
-    }
+    tcc.set_output_type(TCC_OUTPUT_EXE).map_err(|e| format!("tcc error: {}", e))?;
+    tcc.set_options("-s").map_err(|e| format!("tcc error: {}", e))?;
+    tcc.set_options("-Os").map_err(|e| format!("tcc error: {}", e))?;
 
     let crt1 = format!("{}/lib/crt1.c", TCC_WIN32_DIR);
-    if let Err(e) = tcc.add_file(&crt1) {
-        eprintln!("tcc error (crt1): {}", e); std::process::exit(1);
-    }
+    tcc.add_file(&crt1).map_err(|e| format!("tcc error (crt1): {}", e))?;
 
     let runtime_with_defines = format!("{}{}", defines_prefix, runtime::RUNTIME_C);
-    if let Err(e) = tcc.compile_string(&runtime_with_defines) {
-        eprintln!("runtime compile error:\n{}", e); std::process::exit(1);
-    }
-    if let Err(e) = tcc.compile_string(c_src) {
-        eprintln!("compile error:\n{}", e); std::process::exit(1);
-    }
-    if let Err(e) = tcc.output_file(out) {
-        eprintln!("link error: {}", e); std::process::exit(1);
-    }
+    tcc.compile_string(&runtime_with_defines).map_err(|e| format!("runtime compile error:\n{}", e))?;
+    tcc.compile_string(c_src).map_err(|e| format!("compile error:\n{}", e))?;
+    tcc.output_file(out).map_err(|e| format!("link error: {}", e))?;
+    Ok(())
 }

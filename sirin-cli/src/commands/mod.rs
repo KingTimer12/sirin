@@ -4,6 +4,7 @@ mod ast;
 mod build;
 mod checker;
 mod emit_c;
+mod run;
 mod tokens;
 
 pub fn register_commands(args: Option<(&str, &ArgMatches)>) {
@@ -13,6 +14,7 @@ pub fn register_commands(args: Option<(&str, &ArgMatches)>) {
         Some(("ast", m)) => ast::execute(m),
         Some(("emit-c", m)) => emit_c::execute(m),
         Some(("build", m)) => build::execute(m),
+        Some(("run", m)) => run::execute(m),
         _ => eprintln!("unknown command"),
     }
 }
