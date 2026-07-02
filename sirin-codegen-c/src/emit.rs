@@ -30,6 +30,8 @@ pub struct Emitter {
     class_parents: HashMap<String, String>,
     /// class name → method name → return type
     class_methods: HashMap<String, HashMap<String, Type>>,
+    /// enum name → ordered (variant name, payload types); tag = variant index
+    enums: HashMap<String, Vec<(String, Vec<Type>)>>,
     /// #define names for each collection type used in emitted output
     used_types: RefCell<HashSet<String>>,
     /// primitive type key (e.g. "int") → set of impl'd method names
@@ -239,6 +241,14 @@ fn check_no_non_tail_recursive<'a>(
                     return Err(err());
                 }
                 check_no_non_tail_recursive(body, fn_name)?;
+            }
+            Stmt::Match { expr, arms } => {
+                if expr_has_recursive_call(&expr.node, fn_name) {
+                    return Err(err());
+                }
+                for arm in arms {
+                    check_no_non_tail_recursive(&arm.body, fn_name)?;
+                }
             }
             Stmt::Fn { .. } => {} // nested fn has its own scope
             _ => {}
@@ -486,6 +496,7 @@ pub struct ModuleExports {
     pub fns: HashMap<String, Type>,
     pub classes: HashMap<String, Vec<(String, Type)>>,
     pub class_methods: HashMap<String, HashMap<String, Type>>,
+    pub enums: HashMap<String, Vec<(String, Vec<Type>)>>,
     pub prim_methods: HashMap<String, HashSet<String>>,
     pub used_types: HashSet<String>,
     pub named_collection_decls: HashMap<String, String>,
@@ -508,6 +519,7 @@ impl Emitter {
             classes: HashMap::new(),
             class_parents: HashMap::new(),
             class_methods: HashMap::new(),
+            enums: HashMap::new(),
             used_types: RefCell::new(HashSet::new()),
             prim_methods: HashMap::new(),
             io_imported: false,
@@ -563,6 +575,7 @@ impl Emitter {
             classes: self.classes.clone(),
             class_parents: self.class_parents.clone(),
             class_methods: self.class_methods.clone(),
+            enums: self.enums.clone(),
             used_types: RefCell::new(self.used_types.borrow().clone()),
             prim_methods: self.prim_methods.clone(),
             io_imported: self.io_imported,
@@ -596,6 +609,9 @@ impl Emitter {
         for (k, v) in &exports.class_methods {
             self.class_methods.insert(k.clone(), v.clone());
         }
+        for (k, v) in &exports.enums {
+            self.enums.insert(k.clone(), v.clone());
+        }
         for (k, v) in &exports.prim_methods {
             self.prim_methods.entry(k.clone()).or_default().extend(v.clone());
         }
@@ -609,6 +625,7 @@ impl Emitter {
     /// Emit only the functions/classes from a module (no `main`, no `#include`).
     /// Returns `(c_body, exports)` where exports can be absorbed by the main emitter.
     pub fn emit_module<'a>(mut self, stmts: &'a [Spanned<Stmt<'a>>]) -> (String, ModuleExports) {
+        let mut enum_stmts = vec![];
         let mut class_stmts = vec![];
         let mut fn_stmts = vec![];
 
@@ -619,6 +636,7 @@ impl Emitter {
                     if m == "sirin.io"  { self.io_imported  = true; }
                     if m == "sirin.net" { self.net_imported  = true; }
                 }
+                Stmt::Enum { .. } => enum_stmts.push(s),
                 Stmt::Class { .. } | Stmt::Impl { .. } => class_stmts.push(s),
                 Stmt::Interface { name, .. } => {
                     self.output.push_str(&format!("/* interface {} */\n\n", name.node));
@@ -628,6 +646,7 @@ impl Emitter {
             }
         }
 
+        for s in &enum_stmts  { self.emit_stmt(&s.node); }
         for s in &class_stmts { self.emit_stmt(&s.node); }
         for s in &fn_stmts    { self.emit_stmt(&s.node); }
 
@@ -638,6 +657,7 @@ impl Emitter {
                 .collect(),
             classes: self.classes.clone(),
             class_methods: self.class_methods.clone(),
+            enums: self.enums.clone(),
             prim_methods: self.prim_methods.clone(),
             used_types: self.used_types.borrow().clone(),
             named_collection_decls: self.named_collection_decls.borrow().clone(),
@@ -730,6 +750,12 @@ fn collect_stmt_vars<'a>(stmt: &Stmt<'a>, out: &mut std::collections::HashSet<St
         Stmt::Spawn { body } => {
             for s in body { collect_stmt_vars(&s.node, out); }
         }
+        Stmt::Match { expr, arms } => {
+            collect_expr_vars(&expr.node, out);
+            for arm in arms {
+                for s in &arm.body { collect_stmt_vars(&s.node, out); }
+            }
+        }
         _ => {}
     }
 }
@@ -817,6 +843,15 @@ fn collect_escaped_stmt<'a>(s: &Stmt<'a>, out: &mut HashSet<String>) {
             collect_escaped_expr(&start.node, out);
             collect_escaped_expr(&end.node, out);
             for st in body { collect_escaped_stmt(&st.node, out); }
+        }
+        // Match arm bodies move/escape like any block; payload binds alias the
+        // scrutinee, so the scrutinee var itself escapes into the match temp.
+        Stmt::Match { expr, arms } => {
+            if let Expr::Var(v) = &expr.node { out.insert(v.to_string()); }
+            collect_escaped_expr(&expr.node, out);
+            for arm in arms {
+                for st in &arm.body { collect_escaped_stmt(&st.node, out); }
+            }
         }
         // A coroutine may outlive the spawning scope and aliases captured values,
         // so conservatively treat every var it references as escaped (never free).
@@ -1409,6 +1444,83 @@ impl Emitter {
                 self.depth -= 1;
                 self.output.push_str(&format!("{}}}\n", self.indent()));
             }
+            Stmt::Enum { name, variants } => {
+                let ename = name.node;
+                self.enums.insert(
+                    ename.to_string(),
+                    variants.iter()
+                        .map(|(v, tys)| (v.node.to_string(), tys.clone()))
+                        .collect(),
+                );
+                // Tagged union: `{ int tag; union { struct {..} Variant; .. } as; }`.
+                // Unit-only enums skip the union (empty unions are invalid C).
+                self.output.push_str("typedef struct {\n    int tag;\n");
+                let payload_variants: Vec<&(Spanned<&str>, Vec<Type>)> =
+                    variants.iter().filter(|(_, tys)| !tys.is_empty()).collect();
+                if !payload_variants.is_empty() {
+                    self.output.push_str("    union {\n");
+                    for (v, tys) in &payload_variants {
+                        let fields = tys.iter().enumerate()
+                            .map(|(i, t)| format!("{} _{};", self.type_to_c(t), i))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        self.output.push_str(&format!(
+                            "        struct {{ {} }} {};\n", fields, v.node));
+                    }
+                    self.output.push_str("    } as;\n");
+                }
+                self.output.push_str(&format!("}} {};\n\n", ename));
+            }
+            Stmt::Match { expr, arms } => {
+                let scrut_ty = self.get_expr(&expr.node);
+                let enum_name = match &scrut_ty {
+                    Type::Named(n) => n.clone(),
+                    _ => return,
+                };
+                let variants = self.enums.get(&enum_name).cloned().unwrap_or_default();
+                let val = self.emit_expr(&expr.node);
+                let id = self.spawn_count;
+                self.spawn_count += 1;
+                let tmp = format!("__match{}", id);
+                self.output.push_str(&format!(
+                    "{}{} {} = {};\n",
+                    self.indent(), self.type_to_c(&scrut_ty), tmp, val));
+                self.output.push_str(&format!(
+                    "{}switch ({}.tag) {{\n", self.indent(), tmp));
+                for arm in arms {
+                    if arm.variant.node == "_" {
+                        self.output.push_str(&format!("{}default: {{\n", self.indent()));
+                    } else {
+                        let tag = variants.iter()
+                            .position(|(v, _)| v == arm.variant.node)
+                            .unwrap_or(0);
+                        self.output.push_str(&format!(
+                            "{}case {}: {{ /* {} */\n", self.indent(), tag, arm.variant.node));
+                    }
+                    self.depth += 1;
+                    self.scope_enter();
+                    if arm.variant.node != "_" {
+                        if let Some((_, payload)) = variants.iter()
+                            .find(|(v, _)| v == arm.variant.node)
+                        {
+                            for (i, (bind, bty)) in arm.binds.iter().zip(payload.iter()).enumerate() {
+                                self.output.push_str(&format!(
+                                    "{}{} {} = {}.as.{}._{};\n",
+                                    self.indent(), self.type_to_c(bty), bind.node,
+                                    tmp, arm.variant.node, i));
+                                self.vars.insert(bind.node.to_string(), bty.clone());
+                                self.declare_var(bind.node);
+                            }
+                        }
+                    }
+                    for s in &arm.body { self.emit_stmt(&s.node); }
+                    self.output.push_str(&format!("{}break;\n", self.indent()));
+                    self.scope_exit();
+                    self.depth -= 1;
+                    self.output.push_str(&format!("{}}}\n", self.indent()));
+                }
+                self.output.push_str(&format!("{}}}\n", self.indent()));
+            }
             Stmt::Break => self.output.push_str(&format!("{}break;\n", self.indent())),
             Stmt::Continue => self.output.push_str(&format!("{}continue;\n", self.indent())),
             Stmt::IfLet { pattern, name, expr, then, else_ } => {
@@ -1900,6 +2012,25 @@ impl Emitter {
                 }
             }
             Expr::MethodCall(obj, method, args) => {
+                // Enum variant construction with payload: `Forma.Circulo(2.0)`
+                if let Expr::Var(ename) = &obj.node {
+                    if !self.vars.contains_key(*ename) {
+                        if let Some(variants) = self.enums.get(*ename) {
+                            let tag = variants.iter()
+                                .position(|(v, _)| v == method)
+                                .unwrap_or(0);
+                            let inits = args.iter().enumerate()
+                                .map(|(i, a)| format!("._{} = ({})", i, self.emit_expr(&a.node)))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            return if inits.is_empty() {
+                                format!("({}){{ .tag = {} }}", ename, tag)
+                            } else {
+                                format!("({}){{ .tag = {}, .as.{} = {{ {} }} }}", ename, tag, method, inits)
+                            };
+                        }
+                    }
+                }
                 // Static net constructors: TcpStream.connect(addr, port)
                 if matches!(&obj.node, Expr::Var("TcpStream") | Expr::NewDefault("TcpStream")) {
                     if *method == "connect" {
@@ -2098,6 +2229,17 @@ impl Emitter {
                 }
             }
             Expr::FieldAccess(obj, field) => {
+                // Unit enum variant: `Forma.Ponto`
+                if let Expr::Var(ename) = &obj.node {
+                    if !self.vars.contains_key(*ename) {
+                        if let Some(variants) = self.enums.get(*ename) {
+                            let tag = variants.iter()
+                                .position(|(v, _)| v == field)
+                                .unwrap_or(0);
+                            return format!("({}){{ .tag = {} }}", ename, tag);
+                        }
+                    }
+                }
                 match &obj.node {
                     // Inside a method, self is a pointer — use the path map to handle inheritance
                     Expr::Var("self") if !self.method_field_paths.is_empty() => {
@@ -2399,6 +2541,12 @@ impl Emitter {
                 if matches!(&obj.node, Expr::Var("TcpStream") | Expr::NewDefault("TcpStream")) {
                     if *method == "connect" { return Type::Named("TcpStream".to_string()); }
                 }
+                // Enum variant construction
+                if let Expr::Var(ename) = &obj.node {
+                    if !self.vars.contains_key(*ename) && self.enums.contains_key(*ename) {
+                        return Type::Named(ename.to_string());
+                    }
+                }
                 if *method == "to_str" { return Type::Str; }
                 let obj_ty = self.get_expr(&obj.node);
                 match &obj_ty {
@@ -2472,6 +2620,12 @@ impl Emitter {
                 }
             }
             Expr::FieldAccess(obj, field) => {
+                // Unit enum variant construction
+                if let Expr::Var(ename) = &obj.node {
+                    if !self.vars.contains_key(*ename) && self.enums.contains_key(*ename) {
+                        return Type::Named(ename.to_string());
+                    }
+                }
                 let obj_ty = self.get_expr(&obj.node);
                 if let Type::Struct(fields) = &obj_ty {
                     if let Some((_, ty)) = fields.iter().find(|(n, _)| n.as_str() == *field) {
@@ -2544,6 +2698,7 @@ impl Emitter {
     /// Emits function declarations at global scope and wraps all other
     /// top-level statements inside `int main(void)`.
     fn emit_top_level<'a>(&mut self, stmts: &'a [Spanned<Stmt<'a>>]) {
+        let mut enum_stmts  = vec![];
         let mut class_stmts = vec![];
         let mut fn_stmts    = vec![];
         let mut rest        = vec![];
@@ -2556,6 +2711,7 @@ impl Emitter {
                     if m == "sirin.async" { self.async_imported = true; }
                     if m == "sirin.net"   { self.net_imported   = true; }
                 }
+                Stmt::Enum { .. }      => enum_stmts.push(s),
                 Stmt::Class { .. }     => class_stmts.push(s),
                 Stmt::Impl { .. }      => class_stmts.push(s),
                 Stmt::Interface { name, .. } => {
@@ -2566,6 +2722,7 @@ impl Emitter {
             }
         }
 
+        for s in &enum_stmts  { self.emit_stmt(&s.node); }
         for s in &class_stmts { self.emit_stmt(&s.node); }
 
         // Module-level Let/CopyLet that are referenced inside a function (or a

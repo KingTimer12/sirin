@@ -33,6 +33,10 @@ pub enum Tokens<'a> {
     Break,
     #[token("continue")]
     Continue,
+    #[token("enum")]
+    Enum,
+    #[token("match")]
+    Match,
     #[token("and")]
     And,
     #[token("or")]

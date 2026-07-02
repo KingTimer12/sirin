@@ -90,6 +90,7 @@ pub fn execute(matches: &ArgMatches) {
         fns: Default::default(),
         classes: Default::default(),
         class_methods: Default::default(),
+        enums: Default::default(),
         prim_methods: Default::default(),
         used_types: Default::default(),
         io_imported: false,

@@ -116,6 +116,20 @@ fn walk_stmt<'a>(stmt: &mut Stmt<'a>, map: &HashMap<String, Type>) {
         }
         Stmt::Default { body } => walk_body(body, map),
         Stmt::Spawn { body } => walk_body(body, map),
+        Stmt::While { body, .. } => walk_body(body, map),
+        Stmt::For { body, .. } => walk_body(body, map),
+        Stmt::Enum { variants, .. } => {
+            for (_, payload) in variants.iter_mut() {
+                for t in payload {
+                    subst(t, map, "");
+                }
+            }
+        }
+        Stmt::Match { arms, .. } => {
+            for arm in arms.iter_mut() {
+                walk_body(&mut arm.body, map);
+            }
+        }
         Stmt::If { then, else_, .. } => {
             walk_body(then, map);
             if let Some(e) = else_ {

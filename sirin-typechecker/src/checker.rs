@@ -42,6 +42,8 @@ pub struct Checker<'a> {
     pub src: &'a str,
     pub(crate) env: Env<'a>,
     classes: HashMap<String, ClassInfo>,
+    /// enum name → ordered (variant name, payload types)
+    enums: HashMap<String, Vec<(String, Vec<Type>)>>,
     interfaces: HashMap<String, Vec<InterfaceMethodInfo>>,
     primitive_impls: HashMap<String, HashMap<String, MethodInfo>>,
     imported_modules: HashSet<String>,
@@ -67,6 +69,7 @@ impl<'a> Checker<'a> {
             src,
             env: Env::new(),
             classes: HashMap::new(),
+            enums: HashMap::new(),
             interfaces: HashMap::new(),
             primitive_impls: HashMap::new(),
             imported_modules: HashSet::new(),
@@ -97,6 +100,14 @@ impl<'a> Checker<'a> {
                         self.fn_sigs.insert(fn_name.clone(), sig);
                         self.fns.insert(fn_name, return_type.clone().unwrap_or(Type::Void));
                     }
+                }
+                Stmt::Enum { name, variants } => {
+                    self.enums.insert(
+                        name.node.to_string(),
+                        variants.iter()
+                            .map(|(v, tys)| (v.node.to_string(), tys.clone()))
+                            .collect(),
+                    );
                 }
                 Stmt::Class { name, fields, methods, extends, .. } => {
                     if name.node.starts_with('_') {
@@ -352,6 +363,107 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
             Stmt::Break | Stmt::Continue => Ok(()),
+            Stmt::Enum { name, variants } => {
+                self.enums.insert(
+                    name.node.to_string(),
+                    variants.iter()
+                        .map(|(v, tys)| (v.node.to_string(), tys.clone()))
+                        .collect(),
+                );
+                Ok(())
+            }
+            Stmt::Match { expr, arms } => {
+                let scrut_ty = self.check_expr(expr)?;
+                let enum_name = match &scrut_ty {
+                    Type::Named(n) if self.enums.contains_key(n) => n.clone(),
+                    Type::Void => {
+                        // cascade from an earlier error — still check arm bodies
+                        for arm in arms {
+                            self.env.push_scope();
+                            for b in &arm.binds { self.env.define(b.node, Type::Void); }
+                            for s in &arm.body { self.check_stmt(s)?; }
+                            self.env.pop_scope();
+                        }
+                        return Ok(());
+                    }
+                    other => {
+                        report_error(
+                            &expr.span.file, self.src, &expr.span,
+                            "match on a non-enum value",
+                            &format!("`match` needs an enum value; found `{:?}`", other),
+                        );
+                        return Err(CheckerError::GenericError(
+                            "`match` scrutinee is not an enum".to_string(),
+                        ));
+                    }
+                };
+                let variants = self.enums.get(&enum_name).cloned().unwrap_or_default();
+                let mut covered: HashSet<String> = HashSet::new();
+                let mut has_wildcard = false;
+                for arm in arms {
+                    if arm.variant.node == "_" {
+                        has_wildcard = true;
+                        self.env.push_scope();
+                        for s in &arm.body { self.check_stmt(s)?; }
+                        self.env.pop_scope();
+                        continue;
+                    }
+                    let Some((_, payload)) = variants.iter()
+                        .find(|(v, _)| v == arm.variant.node)
+                    else {
+                        report_error(
+                            &arm.variant.span.file, self.src, &arm.variant.span,
+                            "unknown enum variant",
+                            &format!("`{}` is not a variant of `{}`", arm.variant.node, enum_name),
+                        );
+                        return Err(CheckerError::GenericError(format!(
+                            "unknown variant `{}` in match on `{}`", arm.variant.node, enum_name
+                        )));
+                    };
+                    if arm.binds.len() != payload.len() {
+                        report_error(
+                            &arm.variant.span.file, self.src, &arm.variant.span,
+                            "wrong number of bindings",
+                            &format!(
+                                "`{}.{}` carries {} value(s); the arm binds {}",
+                                enum_name, arm.variant.node, payload.len(), arm.binds.len()
+                            ),
+                        );
+                        return Err(CheckerError::GenericError(format!(
+                            "arm `{}` binds {} values, variant has {}",
+                            arm.variant.node, arm.binds.len(), payload.len()
+                        )));
+                    }
+                    covered.insert(arm.variant.node.to_string());
+                    self.env.push_scope();
+                    for (b, bty) in arm.binds.iter().zip(payload.iter()) {
+                        self.env.define(b.node, bty.clone());
+                    }
+                    for s in &arm.body { self.check_stmt(s)?; }
+                    self.env.pop_scope();
+                }
+                if !has_wildcard {
+                    let missing: Vec<&str> = variants.iter()
+                        .filter(|(v, _)| !covered.contains(v))
+                        .map(|(v, _)| v.as_str())
+                        .collect();
+                    if !missing.is_empty() {
+                        report_error(
+                            &expr.span.file, self.src, &expr.span,
+                            "non-exhaustive match",
+                            &format!(
+                                "missing variant(s): {} — add the arm(s) or a `_ =>` catch-all",
+                                missing.join(", ")
+                            ),
+                        );
+                        return Err(CheckerError::GenericError(format!(
+                            "non-exhaustive match on `{}`: missing {}",
+                            enum_name, missing.join(", ")
+                        )));
+                    }
+                }
+                Ok(())
+            }
             Stmt::IfLet { pattern, name, expr, then, else_ } => {
                 let scrutinee = self.check_expr(expr)?;
                 // Resolve the bound name's type from the pattern + scrutinee shape.
@@ -910,6 +1022,46 @@ impl<'a> Checker<'a> {
                         }
                         _ => {}
                     }
+                    // Enum variant construction with payload: `Forma.Circulo(2.0)`
+                    if let Some(variants) = self.enums.get(*type_name).cloned() {
+                        let Some((_, payload)) = variants.iter().find(|(v, _)| v == method)
+                        else {
+                            report_error(
+                                &expr.span.file, self.src, &expr.span,
+                                "unknown enum variant",
+                                &format!("`{}` is not a variant of `{}`", method, type_name),
+                            );
+                            return Err(CheckerError::GenericError(format!(
+                                "unknown variant `{}.{}`", type_name, method
+                            )));
+                        };
+                        if args.len() != payload.len() {
+                            report_error(
+                                &expr.span.file, self.src, &expr.span,
+                                "wrong number of payload values",
+                                &format!(
+                                    "`{}.{}` takes {} value(s); {} given",
+                                    type_name, method, payload.len(), args.len()
+                                ),
+                            );
+                            return Err(CheckerError::GenericError(format!(
+                                "variant `{}.{}` arity mismatch", type_name, method
+                            )));
+                        }
+                        for (arg, pty) in args.iter().zip(payload.iter()) {
+                            let got = self.check_expr(arg)?;
+                            if !Self::type_compatible(pty, &got) {
+                                report_error(
+                                    &arg.span.file, self.src, &arg.span,
+                                    "wrong payload type",
+                                    &format!("expected `{:?}`, found `{:?}`", pty, got),
+                                );
+                                return Err(CheckerError::TypeError(pty.clone(), got));
+                            }
+                            self.consume_var(arg, &format!("{}.{}", type_name, method));
+                        }
+                        return Ok(Type::Named(type_name.to_string()));
+                    }
                 }
 
                 let obj_ty = self.check_expr(obj)?;
@@ -1148,6 +1300,36 @@ impl<'a> Checker<'a> {
 
             // ── Class / OOP expressions ───────────────────────────────────────
             Expr::FieldAccess(obj, field) => {
+                // Unit enum variant: `Forma.Ponto`
+                if let Expr::Var(type_name) = &obj.node {
+                    if let Some(variants) = self.enums.get(*type_name) {
+                        return match variants.iter().find(|(v, _)| v == field) {
+                            Some((_, payload)) if payload.is_empty() => {
+                                Ok(Type::Named(type_name.to_string()))
+                            }
+                            Some(_) => {
+                                report_error(
+                                    &expr.span.file, self.src, &expr.span,
+                                    "variant needs payload",
+                                    &format!("`{}.{}` carries values — construct it with `(...)`", type_name, field),
+                                );
+                                Err(CheckerError::GenericError(format!(
+                                    "variant `{}.{}` used without payload", type_name, field
+                                )))
+                            }
+                            None => {
+                                report_error(
+                                    &expr.span.file, self.src, &expr.span,
+                                    "unknown enum variant",
+                                    &format!("`{}` is not a variant of `{}`", field, type_name),
+                                );
+                                Err(CheckerError::GenericError(format!(
+                                    "unknown variant `{}.{}`", type_name, field
+                                )))
+                            }
+                        };
+                    }
+                }
                 let obj_ty = self.check_expr(obj)?;
                 if let Type::Struct(fields) = &obj_ty {
                     if let Some((_, ty)) = fields.iter().find(|(n, _)| n == *field) {

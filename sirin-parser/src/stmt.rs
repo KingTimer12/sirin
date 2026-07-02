@@ -40,6 +40,15 @@ pub struct InterfaceMethod<'a> {
     pub return_type: Option<Type>,
 }
 
+/// One `Variant(binds..) => body` arm of a `match`. A `variant` of `"_"` is the
+/// wildcard catch-all (no binds).
+#[derive(Debug)]
+pub struct MatchArm<'a> {
+    pub variant: Spanned<&'a str>,
+    pub binds: Vec<Spanned<&'a str>>,
+    pub body: Vec<Spanned<Stmt<'a>>>,
+}
+
 #[derive(Debug)]
 pub enum Stmt<'a> {
     Let {
@@ -85,6 +94,18 @@ pub enum Stmt<'a> {
     },
     Break,
     Continue,
+    // `enum Forma { Circulo(float), Retangulo(float, float), Ponto }` — sum type
+    // with optional positional payloads per variant.
+    Enum {
+        name: Spanned<&'a str>,
+        variants: Vec<(Spanned<&'a str>, Vec<Type>)>,
+    },
+    // `match expr { Variant(x) => { .. }, _ => { .. } }` — exhaustive over the
+    // scrutinee enum's variants (or closed by a `_` arm).
+    Match {
+        expr: Box<Spanned<Expr<'a>>>,
+        arms: Vec<MatchArm<'a>>,
+    },
     // `if Some(name) = opt { .. }` / `if Ok(x) = r { .. }` / `if Err(e) = r { .. }`
     // — binds the destructured value when the pattern matches.
     IfLet {

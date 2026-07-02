@@ -15,7 +15,7 @@ use sirin_lexer::token::Tokens;
 use crate::{
     expr::{BinOp, Expr},
     span::Spanned,
-    stmt::{BindPattern, ClassField, ImplTarget, InterfaceMethod, Stmt},
+    stmt::{BindPattern, ClassField, ImplTarget, InterfaceMethod, MatchArm, Stmt},
     types::Type,
 };
 
@@ -662,6 +662,69 @@ pub fn parser<'a>()
                 )
             });
 
+        // `enum Forma { Circulo(float), Retangulo(float, float), Ponto }`
+        let enum_variant = spanned_name
+            .clone()
+            .then(
+                ty.clone()
+                    .separated_by(just(Tokens::Comma))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen))
+                    .or_not(),
+            )
+            .map(|(name, payload)| (name, payload.unwrap_or_default()));
+        let enum_stmt = just(Tokens::Enum)
+            .ignore_then(spanned_name.clone())
+            .then(
+                enum_variant
+                    .separated_by(just(Tokens::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+            )
+            .map_with(|(name, variants), extra| {
+                Spanned::new(Stmt::Enum { name, variants }, sp(extra.span()))
+            });
+
+        // `match expr { Variant(x, y) => { .. }, Unit => stmt, _ => { .. } }`
+        // Arm body: a `{ .. }` block or a single statement. `_` = wildcard arm.
+        let arm_body = choice((
+            block.clone(),
+            decl.clone().map(|s| vec![s]),
+        ));
+        let match_arm = spanned_name
+            .clone()
+            .then(
+                spanned_name
+                    .clone()
+                    .separated_by(just(Tokens::Comma))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::LParen), just(Tokens::RParen))
+                    .or_not(),
+            )
+            .then_ignore(just(Tokens::FatArrow))
+            .then(arm_body)
+            .map(|((variant, binds), body)| MatchArm {
+                variant,
+                binds: binds.unwrap_or_default(),
+                body,
+            });
+        let match_stmt = just(Tokens::Match)
+            .ignore_then(expr.clone())
+            .then(
+                match_arm
+                    .separated_by(just(Tokens::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Tokens::BlockStart), just(Tokens::BlockEnd)),
+            )
+            .map_with(|(scrut, arms), extra| {
+                Spanned::new(
+                    Stmt::Match { expr: Box::new(scrut), arms },
+                    sp(extra.span()),
+                )
+            });
+
         let r#break = just(Tokens::Break)
             .map_with(|_, extra| Spanned::new(Stmt::Break, sp(extra.span())));
         let r#continue = just(Tokens::Continue)
@@ -976,6 +1039,8 @@ pub fn parser<'a>()
             .or(r#for)
             .or(r#break)
             .or(r#continue)
+            .or(enum_stmt)
+            .or(match_stmt)
             .or(r#fn)
             .or(spawn_stmt)
             .or(class_stmt)
