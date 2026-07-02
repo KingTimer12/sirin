@@ -1,5 +1,5 @@
 [workspace]
-members = ["sirin-cli", "sirin-codegen-c", "sirin-diagnostics", "sirin-lexer", "sirin-parser", "sirin-typechecker"]
+members = ["sirin-cli", "sirin-codegen-c", "sirin-diagnostics", "sirin-lexer", "sirin-lsp", "sirin-parser", "sirin-typechecker"]
 resolver = "3"
 
 [workspace.package]
