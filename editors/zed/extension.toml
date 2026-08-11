@@ -1,0 +1,16 @@
+id = "sirin"
+name = "Sirin"
+description = "Sirin language support (diagnostics, hover, go-to-definition)"
+version = "0.1.0"
+schema_version = 1
+authors = ["Sirin contributors"]
+repository = "https://github.com/KingTimer12/sirin-lang"
+
+[language_servers.sirin-lsp]
+name = "Sirin Language Server"
+languages = ["Sirin"]
+
+# Local grammar: dev extensions may point at a checkout on disk. To publish,
+# replace `path` with `repository` + `rev` of a tree-sitter-sirin repo.
+[grammars.sirin]
+path = "../tree-sitter-sirin"

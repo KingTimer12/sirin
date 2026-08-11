@@ -1,0 +1,19 @@
+{
+  "grammars": [
+    {
+      "name": "sirin",
+      "camelcase": "Sirin",
+      "scope": "source.sirin",
+      "path": ".",
+      "file-types": ["sn"],
+      "highlights": ["queries/highlights.scm"],
+      "injection-regex": "^sirin$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Sirin grammar for tree-sitter",
+    "authors": [{ "name": "Sirin contributors" }]
+  }
+}

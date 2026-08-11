@@ -1,0 +1,14 @@
+{
+  "name": "tree-sitter-sirin",
+  "version": "0.1.0",
+  "description": "Sirin grammar for tree-sitter",
+  "main": "bindings/node",
+  "license": "MIT",
+  "tree-sitter": [
+    {
+      "scope": "source.sirin",
+      "file-types": ["sn"],
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}
