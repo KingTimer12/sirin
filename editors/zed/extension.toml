@@ -10,7 +10,11 @@ repository = "https://github.com/KingTimer12/sirin-lang"
 name = "Sirin Language Server"
 languages = ["Sirin"]
 
-# Local grammar: dev extensions may point at a checkout on disk. To publish,
-# replace `path` with `repository` + `rev` of a tree-sitter-sirin repo.
+# Grammar lives in this same repo, under editors/tree-sitter-sirin. Zed clones
+# `repository` at `rev`, so the grammar must be committed and reachable there —
+# bump `rev` after changing grammar.js. Swap the local path for the GitHub URL
+# once the commit is pushed.
 [grammars.sirin]
-path = "../tree-sitter-sirin"
+repository = "file:///Users/aaronyanoliveirasaldanha/app/sirin-lang"
+rev = "7d59fc131a1461c70302f8fd5e4edd5e5ddbb42c"
+path = "editors/tree-sitter-sirin"
