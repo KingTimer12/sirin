@@ -89,7 +89,7 @@ fn watch_loop(path: &str) {
     // Default signal handling already terminates us; the child dies with the
     // terminal group on Unix, so no handler dependency is needed.
 
-    let mut rebuild = |watched: &mut Vec<PathBuf>, child: &mut Option<Child>| {
+    let rebuild = |watched: &mut Vec<PathBuf>, child: &mut Option<Child>| {
         kill(child);
         eprintln!("\x1b[2m[watch] building {}...\x1b[0m", path);
         match try_build(path) {
