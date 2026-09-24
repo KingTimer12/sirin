@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  TREE_SITTER_CLI_VERSION: 0.26.13
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+
+  grammar:
+    name: Tree-sitter grammar
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/tree-sitter-sirin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install tree-sitter CLI
+        run: npm install -g tree-sitter-cli@${{ env.TREE_SITTER_CLI_VERSION }}
+      - name: Check generated parser is up to date
+        run: |
+          tree-sitter generate
+          git diff --exit-code -- src || {
+            echo "::error::src/ is stale. Run 'tree-sitter generate' in editors/tree-sitter-sirin and commit."
+            exit 1
+          }
+      - name: Compile grammar
+        run: tree-sitter build
+      - name: Check Zed extension rev matches grammar
+        working-directory: .
+        run: |
+          rev=$(sed -n '/^\[grammars\.sirin\]/,/^\[/ s/^rev *= *"\([0-9a-f]*\)"/\1/p' editors/zed/extension.toml)
+          echo "extension.toml rev: $rev"
+          git cat-file -e "$rev^{commit}" || {
+            echo "::error file=editors/zed/extension.toml::rev $rev not found in repository"
+            exit 1
+          }
+          git diff --quiet "$rev" HEAD -- editors/tree-sitter-sirin || {
+            echo "::error file=editors/zed/extension.toml::Grammar changed since rev $rev. Bump rev to the latest commit touching editors/tree-sitter-sirin."
+            exit 1
+          }
+
+  zed-extension:
+    name: Zed extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/zed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: editors/zed
+      - run: cargo build --release --target wasm32-wasip2

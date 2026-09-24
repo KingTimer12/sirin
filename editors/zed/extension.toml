@@ -4,7 +4,7 @@ description = "Sirin language support (diagnostics, hover, go-to-definition)"
 version = "0.1.0"
 schema_version = 1
 authors = ["Sirin contributors"]
-repository = "https://github.com/KingTimer12/sirin-lang"
+repository = "https://github.com/KingTimer12/sirin"
 
 [language_servers.sirin-lsp]
 name = "Sirin Language Server"
@@ -12,9 +12,8 @@ languages = ["Sirin"]
 
 # Grammar lives in this same repo, under editors/tree-sitter-sirin. Zed clones
 # `repository` at `rev`, so the grammar must be committed and reachable there —
-# bump `rev` after changing grammar.js. Swap the local path for the GitHub URL
-# once the commit is pushed.
+# bump `rev` after changing grammar.js and pushing (CI checks this).
 [grammars.sirin]
-repository = "file:///Users/aaronyanoliveirasaldanha/app/sirin-lang"
+repository = "https://github.com/KingTimer12/sirin"
 rev = "7d59fc131a1461c70302f8fd5e4edd5e5ddbb42c"
 path = "editors/tree-sitter-sirin"
