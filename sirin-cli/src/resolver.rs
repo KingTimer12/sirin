@@ -121,8 +121,13 @@ mod tests {
     use std::fs;
 
     fn tmp_dir() -> PathBuf {
+        // Tests run in parallel, and the clock alone can repeat (Windows has a
+        // coarse timer), so a counter keeps every directory unique.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let base = std::env::temp_dir().join(format!(
-            "sirin_resolver_test_{}",
+            "sirin_resolver_test_{}_{}_{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

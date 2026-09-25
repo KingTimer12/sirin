@@ -206,4 +206,59 @@ mod tests {
             "expected TypeError(U8, Str), got {err:?}"
         );
     }
+
+    /// Check `src` and return the first error, if any.
+    fn first_error(src: &str) -> Option<String> {
+        let tokens = sirin_parser::lex(src);
+        let eoi = SimpleSpan::from(src.len()..src.len());
+        let stmts = parser().parse(tokens.as_slice().split_token_span(eoi))
+            .into_result().expect("parse failed");
+        let mut checker = Checker::new(src);
+        for stmt in &stmts {
+            if let Err(e) = checker.check_stmt(stmt) {
+                return Some(checker.take_diagnostic(&e, &stmt.span).message());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_undeclared_function() {
+        let msg = first_error("x = nosuch(1)").expect("expected an error");
+        assert!(msg.contains("undeclared function"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_enum_variant_needs_enum_name() {
+        let msg = first_error("enum Shape {
+    Circle(float),
+    Point
+}
+s = Circle(2.0)")
+            .expect("expected an error");
+        assert!(msg.contains("Shape.Circle(...)"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_qualified_enum_variant_ok() {
+        check_ok!("enum Shape {
+    Circle(float),
+    Point
+}
+s = Shape.Circle(2.0)
+p = Shape.Point");
+    }
+
+    // A `return` inside an `if` leaves the function, so it must not mark the
+    // value as moved for the code after the `if`.
+    #[test]
+    fn test_return_in_branch_is_not_a_move() {
+        check_ok!("fn f(acc: str, done: bool) -> str {
+    if (done) {
+        return acc
+    }
+    b = acc
+    return b
+}");
+    }
 }

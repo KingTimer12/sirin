@@ -35,7 +35,7 @@ pub struct Emitter {
     /// #define names for each collection type used in emitted output
     used_types: RefCell<HashSet<String>>,
     /// primitive type key (e.g. "int") → set of impl'd method names
-    prim_methods: HashMap<String, HashSet<String>>,
+    prim_methods: HashMap<String, HashMap<String, Type>>,
     /// true when `use sirin.io` was seen
     io_imported: bool,
     /// true when `use sirin.async` was seen
@@ -125,6 +125,24 @@ fn c_fn_name(name: &str) -> String {
     } else {
         name.to_string()
     }
+}
+
+/// C name prefix of the functions generated for `impl <primitive> { .. }`.
+fn prim_prefix_of(ty: &Type) -> Option<&'static str> {
+    Some(match ty {
+        Type::Int | Type::I64 => "int",
+        Type::Float => "float",
+        Type::Str => "str",
+        Type::Bool => "bool",
+        Type::U8 => "u8",
+        Type::U16 => "u16",
+        Type::U32 => "u32",
+        Type::U64 => "u64",
+        Type::I8 => "i8",
+        Type::I16 => "i16",
+        Type::I32 => "i32",
+        _ => return None,
+    })
 }
 
 // True if any Stmt::Return in stmts (recursively) has value = Expr::Call(fn_name, _)
@@ -497,7 +515,7 @@ pub struct ModuleExports {
     pub classes: HashMap<String, Vec<(String, Type)>>,
     pub class_methods: HashMap<String, HashMap<String, Type>>,
     pub enums: HashMap<String, Vec<(String, Vec<Type>)>>,
-    pub prim_methods: HashMap<String, HashSet<String>>,
+    pub prim_methods: HashMap<String, HashMap<String, Type>>,
     pub used_types: HashSet<String>,
     pub named_collection_decls: HashMap<String, String>,
     pub io_imported: bool,
@@ -540,6 +558,33 @@ impl Emitter {
             clone_names: RefCell::new(HashSet::new()),
             scopes: vec![HashSet::new()],
         }
+    }
+
+    /// Rebind the parameters for a tail call (`return f(a, b)` → `goto tco_start`).
+    /// Every new value is evaluated before any parameter is overwritten, since a
+    /// later argument may read an earlier parameter: `f(n - 1, acc * n)`.
+    fn emit_tco_rebind(&mut self, params: &[String], new_vals: &[String]) {
+        let changed: Vec<(&String, &String)> = params.iter()
+            .zip(new_vals.iter())
+            .filter(|(p, v)| p != v)
+            .collect();
+        if changed.len() == 1 {
+            let (p, v) = changed[0];
+            self.output.push_str(&format!("{}{} = {};\n", self.indent(), p, v));
+            return;
+        }
+        // Own block so several tail calls in one scope don't redeclare the temps.
+        self.output.push_str(&format!("{}{{\n", self.indent()));
+        self.depth += 1;
+        for (i, (p, v)) in changed.iter().enumerate() {
+            self.output.push_str(&format!(
+                "{}__typeof__({}) __tco{} = {};\n", self.indent(), p, i, v));
+        }
+        for (i, (p, _)) in changed.iter().enumerate() {
+            self.output.push_str(&format!("{}{} = __tco{};\n", self.indent(), p, i));
+        }
+        self.depth -= 1;
+        self.output.push_str(&format!("{}}}\n", self.indent()));
     }
 
     /// Enter/leave a lexical block scope for declared-variable tracking.
@@ -1195,19 +1240,13 @@ impl Emitter {
                         self.output
                             .push_str(&format!("{}if ({}) {{\n", self.indent(), cond_str));
                         self.depth += 1;
-                        for (p, v) in params.iter().zip(new_vals.iter()) {
-                            self.output
-                                .push_str(&format!("{}{} = {};\n", self.indent(), p, v));
-                        }
+                        self.emit_tco_rebind(&params, &new_vals);
                         self.output
                             .push_str(&format!("{}goto tco_start;\n", self.indent()));
                         self.depth -= 1;
                         self.output.push_str(&format!("{}}}\n", self.indent()));
                     } else {
-                        for (p, v) in params.iter().zip(new_vals.iter()) {
-                            self.output
-                                .push_str(&format!("{}{} = {};\n", self.indent(), p, v));
-                        }
+                        self.emit_tco_rebind(&params, &new_vals);
                         self.output
                             .push_str(&format!("{}goto tco_start;\n", self.indent()));
                     }
@@ -1917,7 +1956,10 @@ impl Emitter {
                                 self.prim_methods
                                     .entry(prefix.to_string())
                                     .or_default()
-                                    .insert(mname.node.to_string());
+                                    .insert(
+                                        mname.node.to_string(),
+                                        return_type.clone().unwrap_or(Type::Void),
+                                    );
                             }
                         }
                     }
@@ -2181,7 +2223,7 @@ impl Emitter {
                             // typed deserialize handled in `let` binding; raw passthrough otherwise
                             "to_object"   => obj_str.clone(),
                             _ => {
-                                if self.prim_methods.get("str").map_or(false, |s| s.contains(*method)) {
+                                if self.prim_methods.get("str").map_or(false, |s| s.contains_key(*method)) {
                                     if args_str.is_empty() {
                                         format!("str_{}({})", method, obj_str)
                                     } else {
@@ -2221,22 +2263,9 @@ impl Emitter {
                             return format!("sirin_int_to_str({})", obj_str);
                         }
                         // Check primitive impl methods registered via `impl T`
-                        let prefix = match &obj_ty {
-                            Type::Int | Type::I64 => Some("int"),
-                            Type::Float           => Some("float"),
-                            Type::Str             => Some("str"),
-                            Type::Bool            => Some("bool"),
-                            Type::U8              => Some("u8"),
-                            Type::U16             => Some("u16"),
-                            Type::U32             => Some("u32"),
-                            Type::U64             => Some("u64"),
-                            Type::I8              => Some("i8"),
-                            Type::I16             => Some("i16"),
-                            Type::I32             => Some("i32"),
-                            _ => None,
-                        };
+                        let prefix = prim_prefix_of(&obj_ty);
                         if let Some(pfx) = prefix {
-                            if self.prim_methods.get(pfx).map_or(false, |s| s.contains(*method)) {
+                            if self.prim_methods.get(pfx).map_or(false, |s| s.contains_key(*method)) {
                                 return if args_str.is_empty() {
                                     format!("{}_{}({})", pfx, method, obj_str)
                                 } else {
@@ -2607,6 +2636,13 @@ impl Emitter {
                 }
                 if *method == "to_str" { return Type::Str; }
                 let obj_ty = self.get_expr(&obj.node);
+                // Methods added to a primitive with `impl T { .. }`
+                if let Some(ret) = prim_prefix_of(&obj_ty)
+                    .and_then(|pfx| self.prim_methods.get(pfx))
+                    .and_then(|m| m.get(*method))
+                {
+                    return ret.clone();
+                }
                 match &obj_ty {
                     Type::Channel(inner) => match *method {
                         "send" | "free" => Type::Void,
@@ -3193,5 +3229,42 @@ mod tests {
             "interface Bird { fn fly() -> str }\nclass Duck implements Bird {\n    fn fly() -> str => \"flaps wings\"\n}"
         );
         assert!(c.contains("/* Duck implements Bird */"), "implements clause must emit comment");
+    }
+
+    // `return fact(n - 1, acc * n)`: `acc * n` must read the old `n`.
+    #[test]
+    fn test_tail_call_evaluates_args_before_rebinding() {
+        let c = emit("fn fact(n: int, acc: int) -> int {
+    return acc if n == 0
+    return fact(n - 1, acc * n)
+}");
+        let tmp = c.find("__tco1 = (acc * n)").expect("new args go to temps first");
+        let assign = c.find("n = __tco0").expect("params are assigned from temps");
+        assert!(tmp < assign, "every arg is evaluated before any param changes:
+{c}");
+    }
+
+    #[test]
+    fn test_tail_call_skips_unchanged_params() {
+        let c = emit("fn count(n: int, step: int) -> int {
+    return n if n <= 0
+    return count(n - step, step)
+}");
+        assert!(c.contains("n = (n - step);"), "single changed param needs no temp:
+{c}");
+        assert!(!c.contains("step = step"), "unchanged param is not reassigned:
+{c}");
+    }
+
+    #[test]
+    fn test_prim_impl_method_return_type() {
+        let c = emit("use sirin.io
+impl int {
+    fn double() -> int => self * 2
+}
+x = 5
+println(x.double())");
+        assert!(c.contains(r#"printf("%lld\n", int_double(x))"#), "int method result prints as int64:
+{c}");
     }
 }

@@ -518,30 +518,46 @@ fn analyze(text: &str, file_path: Option<&Path>) -> Analysis {
     let mut alias_map: HashMap<String, Type> = HashMap::new();
     let mut checker = Checker::new(text);
     let mut visited: Vec<PathBuf> = Vec::new();
+    // Any local module we fail to load may define functions the file calls.
+    let mut modules_missing = false;
+    let is_local_use = |s: &Spanned<Stmt>| {
+        matches!(&s.node, Stmt::Use { path } if path.first().copied() != Some("sirin"))
+    };
     if let Some(fp) = file_path {
-        let mut queue: Vec<PathBuf> = stmts.iter()
-            .filter_map(|s| match &s.node {
-                Stmt::Use { path } => simple_module_path(path, fp),
-                _ => None,
-            })
-            .collect();
+        let mut queue: Vec<PathBuf> = Vec::new();
+        for s in &stmts {
+            if let Stmt::Use { path } = &s.node {
+                match simple_module_path(path, fp) {
+                    Some(p) => queue.push(p),
+                    None if is_local_use(s) => modules_missing = true,
+                    None => {}
+                }
+            }
+        }
         while let Some(mp) = queue.pop() {
             if visited.contains(&mp) { continue; }
             visited.push(mp.clone());
-            let Ok(msrc) = std::fs::read_to_string(&mp) else { continue; };
+            let Ok(msrc) = std::fs::read_to_string(&mp) else { modules_missing = true; continue; };
             let mtokens = sirin_parser::lex(&msrc);
-            let Ok(mut mstmts) = sirin_parser::parse(&msrc, &mtokens) else { continue; };
+            let Ok(mut mstmts) = sirin_parser::parse(&msrc, &mtokens) else { modules_missing = true; continue; };
             resolve_aliases(&mut mstmts, &mut alias_map);
             checker.import_module(&mstmts);
             collect_defs(&mstmts, Some(&mp), None, &mut defs);
             for s in &mstmts {
                 if let Stmt::Use { path } = &s.node {
-                    if let Some(dep) = simple_module_path(path, &mp) {
-                        queue.push(dep);
+                    match simple_module_path(path, &mp) {
+                        Some(dep) => queue.push(dep),
+                        None if is_local_use(s) => modules_missing = true,
+                        None => {}
                     }
                 }
             }
         }
+    } else if stmts.iter().any(is_local_use) {
+        modules_missing = true;
+    }
+    if modules_missing {
+        checker.allow_unknown_calls();
     }
 
     resolve_aliases(&mut stmts, &mut alias_map);

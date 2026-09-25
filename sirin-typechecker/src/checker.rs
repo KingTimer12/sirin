@@ -64,6 +64,9 @@ pub struct Checker<'a> {
     /// Rendered form of the error currently propagating out of `check_stmt`,
     /// recorded where the most precise span is known.
     pending: Option<Diagnostic>,
+    /// Some imported modules could not be loaded, so a call to an unknown
+    /// function may be one of theirs rather than a typo.
+    allow_unknown_calls: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -83,6 +86,7 @@ impl<'a> Checker<'a> {
             in_async_ctx: false,
             async_imported: false,
             pending: None,
+            allow_unknown_calls: false,
         }
     }
 
@@ -108,6 +112,23 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `Circle(2.0)` where `Circle` is a variant: enum variants must be
+    /// qualified with their enum (`Shape.Circle(2.0)`). Returns true if reported.
+    fn report_bare_variant(&mut self, expr: &Spanned<Expr<'a>>, name: &str, has_args: bool) -> bool {
+        let Some(enum_name) = self.enums.iter()
+            .find(|(_, vs)| vs.iter().any(|(v, _)| v == name))
+            .map(|(e, _)| e.clone())
+        else {
+            return false;
+        };
+        let args = if has_args { "(...)" } else { "" };
+        self.report_help(&expr.span, "enum variant used without its enum",
+            format!("`{}` is a variant of `{}`", name, enum_name),
+            Some(format!("write `{}.{}{}`", enum_name, name, args)),
+        );
+        true
+    }
+
     fn report_condition(&mut self, cond: &Spanned<Expr<'a>>, found: &Type) {
         self.report_help(
             &cond.span,
@@ -125,6 +146,12 @@ impl<'a> Checker<'a> {
 
     /// Register exported symbols from a parsed local module before checking the main file.
     /// Private symbols (name starts with `_`) are tracked but not exported.
+    /// Accept calls to functions this checker has not seen. For callers that
+    /// could not load every module the file imports (e.g. an editor buffer).
+    pub fn allow_unknown_calls(&mut self) {
+        self.allow_unknown_calls = true;
+    }
+
     pub fn import_module(&mut self, stmts: &[Spanned<Stmt<'_>>]) {
         for s in stmts {
             match &s.node {
@@ -608,9 +635,10 @@ impl<'a> Checker<'a> {
 
                 let return_ty = match value {
                     Some(expr) => {
-                        let t = self.check_expr(expr)?;
-                        self.consume_var(expr, "return value");
-                        t
+                        // Not a move: control leaves the function here, so no later
+                        // code can observe it, and marking it would leak out of an
+                        // `if` branch (`if (done) { return acc }` then `acc.set(..)`).
+                        self.check_expr(expr)?
                     }
                     None => Type::Void,
                 };
@@ -1048,7 +1076,20 @@ impl<'a> Checker<'a> {
                     if let Some(ret) = self.fns.get(*name) {
                         return Ok(ret.clone());
                     }
-                    Ok(Type::Int) // TODO: resolve local fn return type
+                    if self.report_bare_variant(expr, name, !args.is_empty()) {
+                        return Err(CheckerError::NameError(name));
+                    }
+                    if self.allow_unknown_calls {
+                        return Ok(Type::Int);
+                    }
+                    self.report_help(&expr.span, "undeclared function",
+                        format!("no function named `{}` is declared", name),
+                        Some(format!(
+                            "check the spelling, declare it with `fn {}(...)`, or `use` the module that defines it",
+                            name
+                        )),
+                    );
+                    Err(CheckerError::NameError(name))
                 }
             },
             Expr::Array(items) => {
@@ -1410,6 +1451,9 @@ impl<'a> Checker<'a> {
                     self.consume_var(arg, &format!("{}(...)", name));
                 }
                 if *name == "Channel" { return Ok(Type::Void); }
+                if !self.classes.contains_key(*name) && self.report_bare_variant(expr, name, !args.is_empty()) {
+                    return Err(CheckerError::NameError(name));
+                }
                 Ok(Type::Named(name.to_string()))
             }
             Expr::NewDefault(name) => {
