@@ -1,0 +1,112 @@
+name: Release
+
+# Push a tag like `v0.1.0` to build the compiler (`sirin`) and the language
+# server (`sirin-lsp`) for every platform and publish them as a GitHub release.
+# The Zed extension downloads `sirin-lsp-<target>.*` from the latest release.
+# Running the workflow manually builds the archives without publishing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04 so the binaries run on older glibc versions too.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, archive: tar.gz }
+          - { target: aarch64-apple-darwin, os: macos-latest, archive: tar.gz }
+          - { target: x86_64-apple-darwin, os: macos-latest, archive: tar.gz }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, archive: zip }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # vendored TinyCC
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p sirin-cli -p sirin-lsp
+
+      - name: Package
+        run: |
+          target=${{ matrix.target }}
+          bin=target/$target/release
+          exe=""
+          if [[ "$target" == *windows* ]]; then exe=".exe"; fi
+
+          mkdir -p dist "stage/sirin-$target" stage/lsp
+          cp "$bin/sirin$exe" "$bin/sirin-lsp$exe" "stage/sirin-$target/"
+          cp "$bin/sirin-lsp$exe" stage/lsp/
+
+          if [[ "$target" == *windows* ]]; then
+            # Windows builds compile with the embedded TinyCC, which needs its
+            # headers, CRT sources and runtime library next to the executable.
+            tcc="stage/sirin-$target/tcc"
+            vendor=sirin-codegen-c/vendor/tinycc
+            mkdir -p "$tcc/win32" "$tcc/lib"
+            cp -r "$vendor/include" "$tcc/include"
+            cp -r "$vendor/win32/include" "$tcc/win32/include"
+            cp -r "$vendor/win32/lib" "$tcc/win32/lib"
+            libtcc1=$(find "target/$target/release/build" -path '*sirin-codegen-c-*/out/libtcc1.a' | head -n 1)
+            test -n "$libtcc1" || { echo "::error::libtcc1.a not found in build output"; exit 1; }
+            cp "$libtcc1" "$tcc/lib/"
+
+            (cd stage && 7z a -tzip "../dist/sirin-$target.zip" "sirin-$target" > /dev/null)
+            (cd stage/lsp && 7z a -tzip "../../dist/sirin-lsp-$target.zip" "sirin-lsp$exe" > /dev/null)
+          else
+            tar -czf "dist/sirin-$target.tar.gz" -C stage "sirin-$target"
+            tar -czf "dist/sirin-lsp-$target.tar.gz" -C stage/lsp sirin-lsp
+          fi
+          ls -l dist
+
+      - name: Smoke test
+        # x86_64 macOS is cross-compiled on an arm64 runner and can't be run there.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: |
+          target=${{ matrix.target }}
+          exe=""
+          if [[ "$target" == *windows* ]]; then exe=".exe"; fi
+          "stage/sirin-$target/sirin$exe" check examples/simple.sn
+          "stage/sirin-$target/sirin$exe" build examples/print.sn
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sirin-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          ls -l
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

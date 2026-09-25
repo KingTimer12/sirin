@@ -13,7 +13,7 @@ use crate::diag::{check_or_report, parse_or_report, read_source, summary};
 use crate::resolver::{ModuleSource, collect_modules, resolve};
 
 #[cfg(windows)]
-use sirin_codegen_c::{TCC_DIR, TCC_RUNTIME_DIR, TCC_WIN32_DIR};
+use sirin_codegen_c::tcc_paths;
 #[cfg(windows)]
 use sirin_codegen_c::tinycc::{TCC_OUTPUT_EXE, Tcc};
 
@@ -248,12 +248,13 @@ fn compile_unix(c_src: &str, defines_prefix: &str, out: &str, net_imported: bool
 #[cfg(windows)]
 fn compile_windows(c_src: &str, defines_prefix: &str, out: &str, _net_imported: bool) -> Result<(), String> {
     let tcc = Tcc::new().map_err(|e| format!("error: {}", e))?;
+    let paths = tcc_paths();
 
-    tcc.set_lib_path(TCC_WIN32_DIR);
-    tcc.add_library_path(TCC_RUNTIME_DIR).map_err(|e| format!("tcc error: {}", e))?;
-    tcc.add_include_path(&format!("{}/include", TCC_DIR)).map_err(|e| format!("tcc error: {}", e))?;
-    tcc.add_include_path(&format!("{}/include", TCC_WIN32_DIR)).map_err(|e| format!("tcc error: {}", e))?;
-    tcc.add_include_path(&format!("{}/include/winapi", TCC_WIN32_DIR)).map_err(|e| format!("tcc error: {}", e))?;
+    tcc.set_lib_path(&paths.win32);
+    tcc.add_library_path(&paths.runtime).map_err(|e| format!("tcc error: {}", e))?;
+    tcc.add_include_path(&format!("{}/include", paths.root)).map_err(|e| format!("tcc error: {}", e))?;
+    tcc.add_include_path(&format!("{}/include", paths.win32)).map_err(|e| format!("tcc error: {}", e))?;
+    tcc.add_include_path(&format!("{}/include/winapi", paths.win32)).map_err(|e| format!("tcc error: {}", e))?;
 
     let tmp = std::env::temp_dir();
     std::fs::write(tmp.join("sirin_runtime.h"), runtime::RUNTIME_H)
@@ -265,7 +266,7 @@ fn compile_windows(c_src: &str, defines_prefix: &str, out: &str, _net_imported: 
     tcc.set_options("-s").map_err(|e| format!("tcc error: {}", e))?;
     tcc.set_options("-Os").map_err(|e| format!("tcc error: {}", e))?;
 
-    let crt1 = format!("{}/lib/crt1.c", TCC_WIN32_DIR);
+    let crt1 = format!("{}/lib/crt1.c", paths.win32);
     tcc.add_file(&crt1).map_err(|e| format!("tcc error (crt1): {}", e))?;
 
     let runtime_with_defines = format!("{}{}", defines_prefix, runtime::RUNTIME_C);

@@ -3,6 +3,11 @@ name = "sirin-cli"
 version.workspace = true
 edition.workspace = true
 
+# The compiler driver is invoked as `sirin` (like `rustc` or `clang`).
+[[bin]]
+name = "sirin"
+path = "src/main.rs"
+
 [dependencies]
 sirin-parser       = { workspace = true }
 sirin-diagnostics  = { workspace = true }
