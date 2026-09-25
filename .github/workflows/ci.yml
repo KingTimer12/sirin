@@ -11,8 +11,17 @@ env:
 
 jobs:
   rust:
-    name: Rust workspace
-    runs-on: ubuntu-latest
+    name: Rust workspace (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The C runtime has per-platform code (fibers vs ucontext, Winsock vs
+        # BSD sockets), so every platform builds and runs real programs.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,6 +30,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
+      - name: Smoke test (build and run programs)
+        run: |
+          exe=""; if [[ "$RUNNER_OS" == "Windows" ]]; then exe=".exe"; fi
+          sirin="target/debug/sirin$exe"
+          for f in print try strops collections async async_await; do
+            "$sirin" build "examples/$f.sn"
+            echo "--- $f"
+            "examples/$f$exe"
+          done
+          "$sirin" build examples/chat/server.sn
+          "$sirin" build examples/chat/client.sn
+          # the HTTP example runs forever: start it, query it, stop it
+          "$sirin" build examples/http/demo.sn
+          # (output to a file, so the server never holds the step's stdout open)
+          "examples/http/demo$exe" > server.log 2>&1 & server=$!
+          sleep 2
+          curl -sf --retry 3 --retry-connrefused -m 10 http://127.0.0.1:8080/ | tee response.txt || true
+          kill "$server" 2>/dev/null || true
+          if [[ "$RUNNER_OS" == "Windows" ]]; then taskkill //F //IM demo.exe > /dev/null 2>&1 || true; fi
+          cat server.log
+          grep -q "hello from sirin" response.txt
 
   grammar:
     name: Tree-sitter grammar

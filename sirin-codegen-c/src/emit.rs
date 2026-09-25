@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 
+use crate::runtime::{Features, RuntimeConfig};
+
 use sirin_parser::{
     expr::{BinOp, Expr},
     span::Spanned,
@@ -509,7 +511,14 @@ fn ty_to_define(ty: &Type) -> Option<&'static str> {
     }
 }
 
+/// A whole program in C, and what it needs from the runtime.
+pub struct CProgram {
+    pub source: String,
+    pub runtime: RuntimeConfig,
+}
+
 /// Symbols exported from a compiled module, absorbed by the main-program emitter.
+#[derive(Default)]
 pub struct ModuleExports {
     pub fns: HashMap<String, Type>,
     pub classes: HashMap<String, Vec<(String, Type)>>,
@@ -519,6 +528,26 @@ pub struct ModuleExports {
     pub used_types: HashSet<String>,
     pub named_collection_decls: HashMap<String, String>,
     pub io_imported: bool,
+    pub async_imported: bool,
+    pub net_imported: bool,
+}
+
+impl ModuleExports {
+    /// Add the exports of another module (emitted later) to these.
+    pub fn merge(&mut self, other: ModuleExports) {
+        self.fns.extend(other.fns);
+        self.classes.extend(other.classes);
+        self.class_methods.extend(other.class_methods);
+        self.enums.extend(other.enums);
+        for (prim, methods) in other.prim_methods {
+            self.prim_methods.entry(prim).or_default().extend(methods);
+        }
+        self.used_types.extend(other.used_types);
+        self.named_collection_decls.extend(other.named_collection_decls);
+        self.io_imported |= other.io_imported;
+        self.async_imported |= other.async_imported;
+        self.net_imported |= other.net_imported;
+    }
 }
 
 impl Emitter {
@@ -662,9 +691,9 @@ impl Emitter {
         }
         self.used_types.borrow_mut().extend(exports.used_types.clone());
         self.named_collection_decls.borrow_mut().extend(exports.named_collection_decls.clone());
-        if exports.io_imported {
-            self.io_imported = true;
-        }
+        self.io_imported    |= exports.io_imported;
+        self.async_imported |= exports.async_imported;
+        self.net_imported   |= exports.net_imported;
     }
 
     /// Emit only the functions/classes from a module (no `main`, no `#include`).
@@ -678,8 +707,9 @@ impl Emitter {
             match &s.node {
                 Stmt::Use { path } => {
                     let m = path.join(".");
-                    if m == "sirin.io"  { self.io_imported  = true; }
-                    if m == "sirin.net" { self.net_imported  = true; }
+                    if m == "sirin.io"    { self.io_imported    = true; }
+                    if m == "sirin.async" { self.async_imported = true; }
+                    if m == "sirin.net"   { self.net_imported   = true; }
                 }
                 Stmt::Enum { .. } => enum_stmts.push(s),
                 Stmt::Class { .. } | Stmt::Impl { .. } => class_stmts.push(s),
@@ -707,21 +737,11 @@ impl Emitter {
             used_types: self.used_types.borrow().clone(),
             named_collection_decls: self.named_collection_decls.borrow().clone(),
             io_imported: self.io_imported,
+            async_imported: self.async_imported,
+            net_imported: self.net_imported,
         };
 
         (self.output, exports)
-    }
-
-    /// Like `emit_program_and_prefix` but returns raw `(body, defines_prefix, io_imported, async_imported, net_imported)`.
-    /// Lets the caller inject module code between the includes and main body.
-    pub fn emit_body_and_prefix<'a>(
-        mut self,
-        stmts: &'a [Spanned<Stmt<'a>>],
-    ) -> (String, String, bool, bool, bool, String) {
-        self.emit_top_level(stmts);
-        let prefix = self.defines_prefix();
-        let named_decls = self.named_collection_decls_string();
-        (self.output, prefix, self.io_imported, self.async_imported, self.net_imported, named_decls)
     }
 
 } // end impl Emitter (helpers below)
@@ -2762,31 +2782,34 @@ impl Emitter {
         }
     }
 
-    pub fn emit_program<'a>(mut self, stmts: &'a [Spanned<Stmt<'a>>]) -> String {
+    /// Emit a whole program. `modules_c` is the already-emitted code of the
+    /// local modules it uses (see `emit_module`), placed before the program's
+    /// own code; pass "" when there are none.
+    pub fn emit_program<'a>(mut self, stmts: &'a [Spanned<Stmt<'a>>], modules_c: &str) -> CProgram {
         self.emit_top_level(stmts);
-        self.finish()
-    }
-
-    /// Like `emit_program` but also returns the defines prefix so the caller
-    /// can prepend it to the runtime source before separate compilation.
-    pub fn emit_program_and_prefix<'a>(mut self, stmts: &'a [Spanned<Stmt<'a>>]) -> (String, String) {
-        self.emit_top_level(stmts);
-        let prefix = self.defines_prefix();
-        let io = if self.io_imported { "#include <stdio.h>\n" } else { "" };
-        let async_h = if self.async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
-        let net_h = if self.net_imported { "#include \"sirin_net.h\"\n" } else { "" };
-        let program = format!("{}#include \"sirin_runtime.h\"\n{}{}{}\n{}", prefix, async_h, net_h, io, self.output);
-        (program, prefix)
-    }
-
-    pub fn emit_program_tcc<'a>(mut self, stmts: &'a [Spanned<Stmt<'a>>]) -> (String, String) {
-        self.emit_top_level(stmts);
-        let prefix = self.defines_prefix();
-        let io = if self.io_imported { "#include <stdio.h>\n" } else { "" };
-        let async_h = if self.async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
-        let net_h = if self.net_imported { "#include \"sirin_net.h\"\n" } else { "" };
-        let program = format!("{}typedef long long int64_t;\n{}{}{}\n{}", prefix, async_h, net_h, io, self.output);
-        (program, prefix)
+        let runtime = RuntimeConfig {
+            features: Features {
+                io: self.io_imported,
+                async_: self.async_imported,
+                net: self.net_imported,
+            },
+            defines: self.used_types.borrow().iter().cloned().collect(),
+        };
+        let mut source = String::from("#include \"sirin_runtime.h\"\n");
+        if runtime.features.async_ || runtime.features.net {
+            source.push_str("#include \"sirin_async.h\"\n");
+        }
+        if runtime.features.net {
+            source.push_str("#include \"sirin_net.h\"\n");
+        }
+        if runtime.features.io {
+            source.push_str("#include <stdio.h>\n");
+        }
+        source.push_str(&self.named_collection_decls_string());
+        source.push('\n');
+        source.push_str(modules_c);
+        source.push_str(&self.output);
+        CProgram { source, runtime }
     }
 
     /// Emits function declarations at global scope and wraps all other
@@ -2892,12 +2915,6 @@ impl Emitter {
 
     fn indent(&self) -> String {
         "    ".repeat(self.depth)
-    }
-
-    fn defines_prefix(&self) -> String {
-        let mut v: Vec<String> = self.used_types.borrow().iter().cloned().collect();
-        v.sort();
-        v.iter().map(|d| format!("#define {}\n", d)).collect()
     }
 
     fn named_collection_decls_string(&self) -> String {
@@ -3131,15 +3148,6 @@ impl Emitter {
         let decl = format!("typedef {} (*{})({});\n", ret_c, name, args);
         self.named_collection_decls.borrow_mut().insert(key, decl);
     }
-
-    pub fn finish(self) -> String {
-        let prefix = self.defines_prefix();
-        let named = self.named_collection_decls_string();
-        let io = if self.io_imported { "#include <stdio.h>\n" } else { "" };
-        let async_h = if self.async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
-        let net_h = if self.net_imported { "#include \"sirin_net.h\"\n" } else { "" };
-        format!("{}#include \"sirin_runtime.h\"\n{}{}{}{}\n{}", prefix, async_h, net_h, io, named, self.output)
-    }
 }
 
 #[cfg(test)]
@@ -3156,7 +3164,7 @@ mod tests {
             .parse(tokens.as_slice().split_token_span(eoi))
             .into_result()
             .expect("parse failed");
-        Emitter::new().emit_program(&stmts)
+        Emitter::new().emit_program(&stmts, "").source
     }
 
     #[test]

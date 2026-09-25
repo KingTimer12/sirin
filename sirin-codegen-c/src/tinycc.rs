@@ -182,6 +182,17 @@ impl Tcc {
         }
     }
 
+    /// Links a library by name (`ws2_32` → ws2_32.def / libws2_32.a)
+    pub fn add_library(&self, name: &str) -> Result<(), String> {
+        let c = CString::new(name).unwrap();
+        let r = unsafe { tcc_add_library(self.state, c.as_ptr()) };
+        if r == -1 {
+            Err(self.collect_errors("add_library"))
+        } else {
+            Ok(())
+        }
+    }
+
     fn collect_errors(&self, ctx: &str) -> String {
         if self.errors.is_empty() {
             format!("tcc error in {ctx} (no message)")

@@ -373,7 +373,7 @@ sirin check  <file>          Type-check a file without building it
 sirin build  <file>          Compile a file into an executable
 sirin run    <file>          Compile a file and run it
 sirin run    <file> --watch  Rebuild and restart on every save
-sirin emit-c <file>          Generate the C source code
+sirin emit-c <file>          Write the C source and the runtime it needs
 sirin tokens <file>          Print the tokens (debugging)
 sirin ast    <file>          Print the syntax tree (debugging)
 ```
@@ -409,16 +409,26 @@ features.
 | `sirin-codegen-c`   | C emitter, tail-call optimization, embedded TinyCC           |
 | `sirin-diagnostics` | Shared diagnostics, rendered with `ariadne`                  |
 | `sirin-lsp`         | Language server built on `tower-lsp`                         |
-| `sirin-runtime`     | C runtime: strings, collections, async scheduler, sockets    |
+| `sirin-runtime`     | C runtime linked into every program (see below)              |
+
+The runtime is split by area, and a build only compiles the parts the
+program uses:
+
+| Directory                    | Contents                                               |
+| ---------------------------- | ------------------------------------------------------ |
+| `sirin-runtime/core`         | memory, strings, JSON fields, console input            |
+| `sirin-runtime/collections`  | `Vec`, `Array`, `Set`, `Map`                           |
+| `sirin-runtime/async`        | coroutine scheduler, channels, per-platform contexts   |
+| `sirin-runtime/net`          | TCP, UDP, per-platform socket layer                    |
 
 ## Status
 
 Sirin is a young project. Known gaps:
 
-- On Windows, programs that use `sirin.async` or `sirin.net` can't be built
-  with the embedded TinyCC yet.
 - There are no generics for user-defined types yet. The built-in
   collections (`Vec[T]`, `Map[K, V]`, ...) are generic.
+- The async scheduler polls instead of sleeping, so a program waiting on a
+  socket or on input keeps one CPU core busy.
 
 ## Contributing
 

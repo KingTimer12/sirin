@@ -729,7 +729,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "sirin-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chumsky",
  "clap",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "sirin-codegen-c"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cc",
  "chumsky",
@@ -755,14 +755,14 @@ dependencies = [
 
 [[package]]
 name = "sirin-diagnostics"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ariadne",
 ]
 
 [[package]]
 name = "sirin-lexer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "logos",
  "sirin-diagnostics",
@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "sirin-lsp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "sirin-diagnostics",
  "sirin-lexer",
@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "sirin-parser"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chumsky",
  "logos",
@@ -792,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "sirin-typechecker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chumsky",
  "logos",

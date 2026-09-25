@@ -1,25 +1,9 @@
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::ArgMatches;
-use sirin_codegen_c::emit::{Emitter, ModuleExports};
-use sirin_codegen_c::runtime;
-use sirin_parser::aliases::resolve_aliases;
-use sirin_parser::stmt::Stmt;
-use sirin_parser::types::Type;
-use sirin_typechecker::checker::Checker;
 
-use crate::diag::{check_or_report, parse_or_report, read_source, summary};
-use crate::resolver::{ModuleSource, collect_modules, resolve};
-
-#[cfg(windows)]
-use sirin_codegen_c::tcc_paths;
-#[cfg(windows)]
-use sirin_codegen_c::tinycc::{TCC_OUTPUT_EXE, Tcc};
-
-fn file_kb(path: &std::path::Path) -> Option<u64> {
-    std::fs::metadata(path).ok().map(|m| (m.len() + 512) / 1024)
-}
+use crate::pipeline::compile_to_c;
+use crate::toolchain::build_executable;
 
 /// Result of a successful build: the produced binary and every `.sn` file that
 /// went into it (main + transitive local modules) — the watch set for `--watch`.
@@ -30,9 +14,7 @@ pub struct BuildResult {
 
 pub fn execute(matches: &ArgMatches) {
     let path = matches.get_one::<String>("file").unwrap();
-    let out_path = std::path::Path::new(path)
-        .with_extension(if cfg!(windows) { "exe" } else { "" });
-    let size_before = file_kb(&out_path);
+    let size_before = file_kb(&executable_path(path));
 
     match try_build(path) {
         Ok(res) => {
@@ -50,228 +32,19 @@ pub fn execute(matches: &ArgMatches) {
     }
 }
 
-/// Full pipeline (parse → resolve modules → typecheck → emit C → cc) with no
-/// process exits, so `run --watch` can keep going after a failed rebuild.
-/// Diagnostics still print to stderr as they are found; the Err is a summary.
+/// Source → executable, without exiting the process on failure (see `pipeline`).
 pub fn try_build(path: &str) -> Result<BuildResult, String> {
-    if !path.ends_with(".sn") {
-        return Err(format!("error: expected a `.sn` source file, got `{}`", path));
-    }
-    let src = read_source(path)?;
-
-    let main_path = PathBuf::from(path)
-        .canonicalize()
-        .map_err(|e| format!("error: {}", e))?;
-
-    // Parse main (tokens + stmts share scope — no lifetime escape)
-    let tokens = sirin_parser::lex(&src);
-    let mut main_stmts = parse_or_report(path, &src, &tokens)
-        .ok_or_else(|| format!("error: could not compile `{}` due to syntax errors", path))?;
-
-    // Type aliases (`type Name = ...`) are erased before checking/codegen; the map is
-    // shared so a module's aliases are visible to files that `use` it.
-    let mut alias_map: HashMap<String, Type> = HashMap::new();
-
-    // ── Collect transitive local module dependencies ──────────────────────────
-    let mut dep_stack: Vec<PathBuf> = vec![];
-    let mut dep_visited: HashSet<PathBuf> = HashSet::new();
-    let mut ordered: Vec<(PathBuf, String)> = vec![];
-
-    for s in &main_stmts {
-        if let Stmt::Use { path: use_path } = &s.node {
-            let refs: Vec<&str> = use_path.iter().copied().collect();
-            match resolve(&refs, &main_path) {
-                Ok(ModuleSource::Local(dep_path)) => {
-                    collect_modules(&dep_path, &mut dep_stack, &mut dep_visited, &mut ordered)
-                        .map_err(|e| format!("error: {}", e))?;
-                }
-                Ok(ModuleSource::Stdlib) => {}
-                Err(e) => return Err(format!("error: {}", e)),
-            }
-        }
-    }
-
-    // ── Process each module: typecheck + emit ─────────────────────────────────
-    let mut checker = Checker::new(&src);
-    let mut all_exports = ModuleExports {
-        fns: Default::default(),
-        classes: Default::default(),
-        class_methods: Default::default(),
-        enums: Default::default(),
-        prim_methods: Default::default(),
-        used_types: Default::default(),
-        io_imported: false,
-        named_collection_decls: Default::default(),
-    };
-    let mut modules_c = String::new();
-
-    for (mod_path, mod_src) in &ordered {
-        // tokens + stmts live only for this iteration
-        let mod_name = mod_path.display().to_string();
-        let mod_tokens = sirin_parser::lex(mod_src.as_str());
-        let mut mod_stmts = parse_or_report(&mod_name, mod_src, &mod_tokens).ok_or_else(|| {
-            format!("error: could not compile module `{}` due to syntax errors", mod_name)
-        })?;
-
-        resolve_aliases(&mut mod_stmts, &mut alias_map);
-        checker.import_module(&mod_stmts);
-
-        let label = mod_path
-            .strip_prefix(main_path.parent().unwrap_or(&main_path))
-            .unwrap_or(mod_path)
-            .display()
-            .to_string();
-        let mut mod_emitter = Emitter::new();
-        mod_emitter.absorb_exports(&all_exports);
-        let (mod_c, exports) = mod_emitter.emit_module(&mod_stmts);
-        modules_c.push_str(&format!("/* === module: {} === */\n{}\n", label, mod_c));
-
-        all_exports.fns.extend(exports.fns);
-        all_exports.classes.extend(exports.classes);
-        all_exports.class_methods.extend(exports.class_methods);
-        all_exports.enums.extend(exports.enums);
-        for (k, v) in exports.prim_methods {
-            all_exports.prim_methods.entry(k).or_default().extend(v);
-        }
-        all_exports.used_types.extend(exports.used_types);
-        all_exports.named_collection_decls.extend(exports.named_collection_decls);
-        if exports.io_imported { all_exports.io_imported = true; }
-    }
-
-    // ── Typecheck main ────────────────────────────────────────────────────────
-    // Resolve aliases now that every module's `type` declarations are in the map.
-    resolve_aliases(&mut main_stmts, &mut alias_map);
-
-    let errors = check_or_report(&mut checker, path, &src, &main_stmts);
-    if errors > 0 {
-        return Err(summary(path, errors));
-    }
-
-    // ── Emit ──────────────────────────────────────────────────────────────────
-    let out_path = std::path::Path::new(path)
-        .with_extension(if cfg!(windows) { "exe" } else { "" });
-
-    let mut main_emitter = Emitter::new();
-    main_emitter.absorb_exports(&all_exports);
-    let (main_body, defines_prefix, io_imported, async_imported, net_imported, named_decls) =
-        main_emitter.emit_body_and_prefix(&main_stmts);
-
-    let io_include    = if io_imported    { "#include <stdio.h>\n" } else { "" };
-    let async_include = if async_imported { "#include \"sirin_async.h\"\n#include <stdlib.h>\n" } else { "" };
-    let net_include   = if net_imported   { "#include \"sirin_net.h\"\n" } else { "" };
-    let c_src = if modules_c.is_empty() {
-        format!(
-            "{}#include \"sirin_runtime.h\"\n{}{}{}{}\n{}",
-            defines_prefix, async_include, net_include, io_include, named_decls, main_body
-        )
-    } else {
-        format!(
-            "{}#include \"sirin_runtime.h\"\n{}{}{}{}\n{}{}",
-            defines_prefix, async_include, net_include, io_include, named_decls, modules_c, main_body
-        )
-    };
-
-    let out_str = out_path.to_string_lossy().into_owned();
-
-    #[cfg(not(windows))]
-    compile_unix(&c_src, &defines_prefix, &out_str, net_imported)?;
-
-    #[cfg(windows)]
-    compile_windows(&c_src, &defines_prefix, &out_str, net_imported)?;
-
-    let mut sources = vec![main_path];
-    sources.extend(ordered.iter().map(|(p, _)| p.clone()));
-    Ok(BuildResult { out_path, sources })
+    let program = compile_to_c(path)?;
+    let out_path = executable_path(path);
+    build_executable(&program.c, &out_path)?;
+    Ok(BuildResult { out_path, sources: program.sources })
 }
 
-#[cfg(not(windows))]
-fn compile_unix(c_src: &str, defines_prefix: &str, out: &str, net_imported: bool) -> Result<(), String> {
-    let tmp = std::env::temp_dir();
-    let h_path    = tmp.join("sirin_runtime.h");
-    let c_rt      = tmp.join("sirin_runtime.c");
-    let c_async_h = tmp.join("sirin_async.h");
-    let c_async   = tmp.join("sirin_async.c");
-    let c_net_h   = tmp.join("sirin_net.h");
-    let c_net     = tmp.join("sirin_net.c");
-    let c_prog    = tmp.join("sirin_program.c");
-
-    std::fs::write(&h_path, runtime::RUNTIME_H)
-        .map_err(|e| format!("error: cannot write runtime header: {}", e))?;
-    let runtime_with_defines = format!("{}{}", defines_prefix, runtime::RUNTIME_C);
-    std::fs::write(&c_rt, &runtime_with_defines)
-        .map_err(|e| format!("error: cannot write runtime source: {}", e))?;
-    std::fs::write(&c_async_h, runtime::ASYNC_H)
-        .map_err(|e| format!("error: cannot write async header: {}", e))?;
-    std::fs::write(&c_async, runtime::ASYNC_C)
-        .map_err(|e| format!("error: cannot write async source: {}", e))?;
-    if net_imported {
-        std::fs::write(&c_net_h, runtime::NET_H)
-            .map_err(|e| format!("error: cannot write net header: {}", e))?;
-        std::fs::write(&c_net, runtime::NET_C)
-            .map_err(|e| format!("error: cannot write net source: {}", e))?;
-    }
-    std::fs::write(&c_prog, c_src)
-        .map_err(|e| format!("error: cannot write program source: {}", e))?;
-
-    let compiler = ["cc", "clang", "gcc"]
-        .iter()
-        .find(|&&cmd| std::process::Command::new(cmd).arg("--version").output().is_ok())
-        .copied()
-        .unwrap_or("cc");
-
-    let mut cmd_args: Vec<String> = vec![
-        c_rt.to_str().unwrap().to_owned(),
-        c_async.to_str().unwrap().to_owned(),
-    ];
-    if net_imported {
-        cmd_args.push(c_net.to_str().unwrap().to_owned());
-    }
-    cmd_args.push(c_prog.to_str().unwrap().to_owned());
-    cmd_args.extend_from_slice(&[
-        "-I".to_owned(), tmp.to_str().unwrap().to_owned(),
-        "-o".to_owned(), out.to_owned(),
-        "-O2".to_owned(),
-        "-Wno-deprecated-declarations".to_owned(),
-    ]);
-
-    let status = std::process::Command::new(compiler)
-        .args(&cmd_args)
-        .status();
-
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => Err(format!("compile error: compiler exited with {}", s)),
-        Err(e) => Err(format!("compile error: cannot run compiler: {}", e)),
-    }
+/// `main.sn` → `main.exe` on Windows, `main` elsewhere.
+fn executable_path(path: &str) -> PathBuf {
+    Path::new(path).with_extension(if cfg!(windows) { "exe" } else { "" })
 }
 
-#[cfg(windows)]
-fn compile_windows(c_src: &str, defines_prefix: &str, out: &str, _net_imported: bool) -> Result<(), String> {
-    let tcc = Tcc::new().map_err(|e| format!("error: {}", e))?;
-    let paths = tcc_paths();
-
-    tcc.set_lib_path(&paths.win32);
-    tcc.add_library_path(&paths.runtime).map_err(|e| format!("tcc error: {}", e))?;
-    tcc.add_include_path(&format!("{}/include", paths.root)).map_err(|e| format!("tcc error: {}", e))?;
-    tcc.add_include_path(&format!("{}/include", paths.win32)).map_err(|e| format!("tcc error: {}", e))?;
-    tcc.add_include_path(&format!("{}/include/winapi", paths.win32)).map_err(|e| format!("tcc error: {}", e))?;
-
-    let tmp = std::env::temp_dir();
-    std::fs::write(tmp.join("sirin_runtime.h"), runtime::RUNTIME_H)
-        .map_err(|e| format!("error: cannot write runtime header to temp: {}", e))?;
-    let tmp_fwd = tmp.to_string_lossy().replace('\\', "/");
-    tcc.add_include_path(&tmp_fwd).map_err(|e| format!("tcc error: {}", e))?;
-
-    tcc.set_output_type(TCC_OUTPUT_EXE).map_err(|e| format!("tcc error: {}", e))?;
-    tcc.set_options("-s").map_err(|e| format!("tcc error: {}", e))?;
-    tcc.set_options("-Os").map_err(|e| format!("tcc error: {}", e))?;
-
-    let crt1 = format!("{}/lib/crt1.c", paths.win32);
-    tcc.add_file(&crt1).map_err(|e| format!("tcc error (crt1): {}", e))?;
-
-    let runtime_with_defines = format!("{}{}", defines_prefix, runtime::RUNTIME_C);
-    tcc.compile_string(&runtime_with_defines).map_err(|e| format!("runtime compile error:\n{}", e))?;
-    tcc.compile_string(c_src).map_err(|e| format!("compile error:\n{}", e))?;
-    tcc.output_file(out).map_err(|e| format!("link error: {}", e))?;
-    Ok(())
+fn file_kb(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|m| (m.len() + 512) / 1024)
 }

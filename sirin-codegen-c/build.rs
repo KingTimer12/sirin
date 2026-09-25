@@ -92,8 +92,6 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/tinycc/libtcc.c");
     println!("cargo:rerun-if-changed=vendor/tinycc/tcc.h");
     println!("cargo:rerun-if-changed=vendor/tinycc/lib/libtcc1.c");
-    println!("cargo:rerun-if-changed=../sirin-runtime/sirin_runtime.h");
-    println!("cargo:rerun-if-changed=../sirin-runtime/sirin_runtime.c");
-    println!("cargo:rerun-if-changed=../sirin-runtime/sirin_async.h");
-    println!("cargo:rerun-if-changed=../sirin-runtime/sirin_async.c");
+    // The Sirin runtime (../sirin-runtime) is embedded with include_str!, which
+    // already recompiles the crate on change; no need to rebuild TinyCC for it.
 }

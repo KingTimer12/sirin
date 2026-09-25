@@ -4,7 +4,9 @@ use crate::commands::register_commands;
 
 mod commands;
 mod diag;
+mod pipeline;
 mod resolver;
+mod toolchain;
 
 fn file_arg() -> clap::Arg {
     arg!(<file> "Path to a .sn source file").required(true)
