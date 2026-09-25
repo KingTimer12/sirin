@@ -2,17 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use clap::ArgMatches;
-use chumsky::Parser;
-use chumsky::input::Input as _;
-use chumsky::span::SimpleSpan;
 use sirin_codegen_c::emit::{Emitter, ModuleExports};
 use sirin_codegen_c::runtime;
 use sirin_parser::aliases::resolve_aliases;
-use sirin_parser::parser::parser;
 use sirin_parser::stmt::Stmt;
 use sirin_parser::types::Type;
 use sirin_typechecker::checker::Checker;
 
+use crate::diag::{check_or_report, parse_or_report, read_source, summary};
 use crate::resolver::{ModuleSource, collect_modules, resolve};
 
 #[cfg(windows)]
@@ -42,8 +39,8 @@ pub fn execute(matches: &ArgMatches) {
             let size_after = file_kb(&res.out_path).unwrap_or(0);
             println!("{}", res.out_path.display());
             match size_before {
-                Some(before) => println!("tamanho: {}KB → {}KB", before, size_after),
-                None         => println!("tamanho: {}KB", size_after),
+                Some(before) => println!("size: {}KB → {}KB", before, size_after),
+                None         => println!("size: {}KB", size_after),
             }
         }
         Err(e) => {
@@ -60,8 +57,7 @@ pub fn try_build(path: &str) -> Result<BuildResult, String> {
     if !path.ends_with(".sn") {
         return Err(format!("error: expected a `.sn` source file, got `{}`", path));
     }
-    let src = std::fs::read_to_string(path)
-        .map_err(|e| format!("error: cannot read `{}`: {}", path, e))?;
+    let src = read_source(path)?;
 
     let main_path = PathBuf::from(path)
         .canonicalize()
@@ -69,14 +65,8 @@ pub fn try_build(path: &str) -> Result<BuildResult, String> {
 
     // Parse main (tokens + stmts share scope — no lifetime escape)
     let tokens = sirin_parser::lex(&src);
-    let eoi = SimpleSpan::from(src.len()..src.len());
-    let mut main_stmts = match parser().parse(tokens.as_slice().split_token_span(eoi)).into_result() {
-        Ok(s) => s,
-        Err(errors) => {
-            for e in &errors { eprintln!("parse error: {:?}", e); }
-            return Err("build failed: parse error".to_string());
-        }
-    };
+    let mut main_stmts = parse_or_report(path, &src, &tokens)
+        .ok_or_else(|| format!("error: could not compile `{}` due to syntax errors", path))?;
 
     // Type aliases (`type Name = ...`) are erased before checking/codegen; the map is
     // shared so a module's aliases are visible to files that `use` it.
@@ -117,18 +107,11 @@ pub fn try_build(path: &str) -> Result<BuildResult, String> {
 
     for (mod_path, mod_src) in &ordered {
         // tokens + stmts live only for this iteration
+        let mod_name = mod_path.display().to_string();
         let mod_tokens = sirin_parser::lex(mod_src.as_str());
-        let mod_eoi = SimpleSpan::from(mod_src.len()..mod_src.len());
-        let mut mod_stmts = match parser()
-            .parse(mod_tokens.as_slice().split_token_span(mod_eoi))
-            .into_result()
-        {
-            Ok(s) => s,
-            Err(errors) => {
-                for e in &errors { eprintln!("parse error in {}: {:?}", mod_path.display(), e); }
-                return Err(format!("build failed: parse error in {}", mod_path.display()));
-            }
-        };
+        let mut mod_stmts = parse_or_report(&mod_name, mod_src, &mod_tokens).ok_or_else(|| {
+            format!("error: could not compile module `{}` due to syntax errors", mod_name)
+        })?;
 
         resolve_aliases(&mut mod_stmts, &mut alias_map);
         checker.import_module(&mod_stmts);
@@ -141,7 +124,7 @@ pub fn try_build(path: &str) -> Result<BuildResult, String> {
         let mut mod_emitter = Emitter::new();
         mod_emitter.absorb_exports(&all_exports);
         let (mod_c, exports) = mod_emitter.emit_module(&mod_stmts);
-        modules_c.push_str(&format!("/* === módulo: {} === */\n{}\n", label, mod_c));
+        modules_c.push_str(&format!("/* === module: {} === */\n{}\n", label, mod_c));
 
         all_exports.fns.extend(exports.fns);
         all_exports.classes.extend(exports.classes);
@@ -159,15 +142,9 @@ pub fn try_build(path: &str) -> Result<BuildResult, String> {
     // Resolve aliases now that every module's `type` declarations are in the map.
     resolve_aliases(&mut main_stmts, &mut alias_map);
 
-    let mut had_error = false;
-    for stmt in &main_stmts {
-        if let Err(e) = checker.check_stmt(stmt) {
-            eprintln!("type error: {:?}", e);
-            had_error = true;
-        }
-    }
-    if had_error {
-        return Err("build failed: type error".to_string());
+    let errors = check_or_report(&mut checker, path, &src, &main_stmts);
+    if errors > 0 {
+        return Err(summary(path, errors));
     }
 
     // ── Emit ──────────────────────────────────────────────────────────────────

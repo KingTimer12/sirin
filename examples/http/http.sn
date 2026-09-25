@@ -1,12 +1,12 @@
-// Biblioteca HTTP/1.1 escrita em Sirin puro.
+// HTTP/1.1 library written in pure Sirin.
 //
-// Agregador: reexporta todos os submódulos. Consumidores fazem `use http`
-// e ganham acesso a `serve`, `Request`, `Response`, parsing e serialização.
+// Aggregator: re-exports every submodule. Consumers write `use http`
+// and get access to `serve`, `Request`, `Response`, parsing and serialization.
 //
-//   sirin/http/types.sn      tipos Request / Response
-//   sirin/http/parse.sn      parsing da requisição (linha, headers, corpo)
-//   sirin/http/serialize.sn  serialização da resposta
-//   sirin/http/transport.sn  envio / recebimento sobre TcpStream
+//   sirin/http/types.sn      Request / Response types
+//   sirin/http/parse.sn      request parsing (line, headers, body)
+//   sirin/http/serialize.sn  response serialization
+//   sirin/http/transport.sn  sending / receiving over TcpStream
 //   sirin/http/server.sn     handler, accept_loop, serve
 
 use http.types

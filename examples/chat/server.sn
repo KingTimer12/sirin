@@ -29,6 +29,6 @@ async fn accept_loop(l: TcpListener) {
 }
 
 listener = TcpListener("0.0.0.0", 3000)
-println("servidor ouvindo na porta 3000")
+println("server listening on port 3000")
 
 spawn accept_loop(listener)

@@ -33,25 +33,25 @@ impl<'a> Env<'a> {
         self.expected_return = return_type
     }
 
-    // abre um novo escopo
+    // open a new scope
     pub fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.ownership.push(HashMap::new());
     }
 
-    // fecha o escopo atual — variáveis somem
+    // close the current scope — its variables go away
     pub fn pop_scope(&mut self) {
         self.scopes.pop();
         self.ownership.pop();
     }
 
-    // define no escopo atual
+    // define in the current scope
     pub fn define(&mut self, name: &'a str, ty: Type) {
         self.scopes.last_mut().unwrap().insert(name, ty);
         self.ownership.last_mut().unwrap().insert(name, OwnershipState::Owned);
     }
 
-    // busca do escopo mais interno para o mais externo
+    // search from the innermost scope to the outermost
     pub fn get(&self, name: &'a str) -> Option<&Type> {
         self.scopes.iter().rev().find_map(|scope| scope.get(name))
     }
@@ -60,7 +60,7 @@ impl<'a> Env<'a> {
         self.ownership.iter().rev().find_map(|scope| scope.get(name))
     }
 
-    // marca variável como movida para `to`; retorna Some(scope_idx) se encontrada
+    // mark variable as moved to `to`; returns true if found
     pub fn mark_moved(&mut self, name: &'a str, to: String) -> bool {
         for scope in self.ownership.iter_mut().rev() {
             if scope.contains_key(name) {

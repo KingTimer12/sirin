@@ -3,7 +3,7 @@ use types
 use parse
 use serialize
 
-// ── envio / recebimento ────────────────────────────────────────────────────────
+// ── send / receive ─────────────────────────────────────────────────────────────
 
 fn send_response(conn: TcpStream, res: Response) {
     raw = serialize_response(res)
@@ -13,7 +13,7 @@ fn send_response(conn: TcpStream, res: Response) {
 fn read_request(conn: TcpStream) -> Request! {
     raw = conn.read()
     if (raw.len() == 0) {
-        return Err("conexão fechada")
+        return Err("connection closed")
     }
     return parse_request(raw)
 }

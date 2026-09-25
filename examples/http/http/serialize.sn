@@ -1,6 +1,6 @@
 use types
 
-// ── serialização da resposta ───────────────────────────────────────────────────
+// ── response serialization ─────────────────────────────────────────────────────
 
 fn status_text(code: int) -> str {
     if (code == 200) { return "OK" }
@@ -15,7 +15,7 @@ fn status_text(code: int) -> str {
     return "Unknown"
 }
 
-// Recursão de cauda sobre o Map de cabeçalhos via `.keys_at(i)`.
+// Tail recursion over the headers Map via `.keys_at(i)`.
 fn serialize_headers_at(headers: Map[str, str], i: int, acc: str) -> str {
     key = headers.keys_at(i)
     if Some(k) = key {

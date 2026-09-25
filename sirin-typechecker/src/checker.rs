@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use sirin_diagnostics::report_error;
+use sirin_diagnostics::{Diagnostic, span::Span};
 use sirin_parser::{
     expr::{BinOp, Expr},
     span::Spanned,
@@ -61,6 +61,9 @@ pub struct Checker<'a> {
     in_async_ctx: bool,
     /// true when `use sirin.async` was seen
     pub async_imported: bool,
+    /// Rendered form of the error currently propagating out of `check_stmt`,
+    /// recorded where the most precise span is known.
+    pending: Option<Diagnostic>,
 }
 
 impl<'a> Checker<'a> {
@@ -79,7 +82,45 @@ impl<'a> Checker<'a> {
             async_fns: HashSet::new(),
             in_async_ctx: false,
             async_imported: false,
+            pending: None,
         }
+    }
+
+    /// Record the diagnostic for the error about to be returned. Only the first
+    /// (innermost) report is kept: outer frames know less about what went wrong.
+    fn report(&mut self, span: &Span, title: &str, label: impl Into<String>) {
+        self.report_help(span, title, label, None::<String>);
+    }
+
+    fn report_help(
+        &mut self,
+        span: &Span,
+        title: &str,
+        label: impl Into<String>,
+        help: Option<impl Into<String>>,
+    ) {
+        if self.pending.is_none() {
+            let mut d = Diagnostic::error(title, span.start..span.end).with_label(label);
+            if let Some(h) = help {
+                d = d.with_help(h);
+            }
+            self.pending = Some(d);
+        }
+    }
+
+    fn report_condition(&mut self, cond: &Spanned<Expr<'a>>, found: &Type) {
+        self.report_help(
+            &cond.span,
+            "condition is not a `bool`",
+            format!("this condition is `{found}`, but it must be `bool`"),
+            found.is_integer().then_some("compare it explicitly, e.g. `x != 0`"),
+        );
+    }
+
+    /// The human-readable diagnostic for an error returned by `check_stmt`.
+    /// `fallback` is used when the checker recorded no location of its own.
+    pub fn take_diagnostic(&mut self, err: &CheckerError<'_>, fallback: &Span) -> Diagnostic {
+        self.pending.take().unwrap_or_else(|| err.to_diagnostic(fallback.start..fallback.end))
     }
 
     /// Register exported symbols from a parsed local module before checking the main file.
@@ -224,6 +265,19 @@ impl<'a> Checker<'a> {
     }
 
     pub fn check_stmt(&mut self, stmt: &Spanned<Stmt<'a>>) -> Result<(), CheckerError<'a>> {
+        // Errors always propagate straight out, so anything still pending here
+        // belongs to an earlier error whose diagnostic the caller never took.
+        self.pending = None;
+        let res = self.check_stmt_inner(stmt);
+        if let Err(e) = &res {
+            if self.pending.is_none() {
+                self.pending = Some(e.to_diagnostic(stmt.span.start..stmt.span.end));
+            }
+        }
+        res
+    }
+
+    fn check_stmt_inner(&mut self, stmt: &Spanned<Stmt<'a>>) -> Result<(), CheckerError<'a>> {
         match &stmt.node {
             Stmt::Let { name, ty: declared, rhs } => {
                 match self.check_expr(rhs) {
@@ -231,6 +285,10 @@ impl<'a> Checker<'a> {
                         let env_ty = if let Some(decl) = declared {
                             if !Self::type_compatible(decl, &rhs_ty) {
                                 self.env.define(name.node, Type::Void);
+                                self.report(&rhs.span, "mismatched types", format!(
+                                    "`{}` is declared as `{}`, but this value is `{}`",
+                                    name.node, decl, rhs_ty
+                                ));
                                 return Err(CheckerError::TypeError(decl.clone(), rhs_ty));
                             }
                             decl.clone()
@@ -257,6 +315,10 @@ impl<'a> Checker<'a> {
                         let env_ty = if let Some(decl) = declared {
                             if !Self::type_compatible(decl, &rhs_ty) {
                                 self.env.define(name.node, Type::Void);
+                                self.report(&rhs.span, "mismatched types", format!(
+                                    "`{}` is declared as `{}`, but this value is `{}`",
+                                    name.node, decl, rhs_ty
+                                ));
                                 return Err(CheckerError::TypeError(decl.clone(), rhs_ty));
                             }
                             decl.clone()
@@ -300,15 +362,18 @@ impl<'a> Checker<'a> {
                     if let Err(e) = self.check_stmt(stmt) { body_res = Err(e); break; }
                 }
                 self.in_async_ctx = prev_ctx;
-                body_res?;
-
+                // Leave the fn scope even on error, so later statements are not
+                // checked as if they were inside this function.
                 self.env.pop_scope();
                 self.env.set_return(None);
+                body_res?;
                 Ok(())
             }
             Stmt::If { cond, then, else_ } => {
                 let cond_ty = self.check_expr(cond)?;
-                if cond_ty != Type::Bool {
+                // `void` means an earlier error or an unknown type — don't pile on.
+                if cond_ty != Type::Bool && cond_ty != Type::Void {
+                    self.report_condition(cond, &cond_ty);
                     return Err(CheckerError::TypeError(Type::Bool, cond_ty));
                 }
 
@@ -330,7 +395,9 @@ impl<'a> Checker<'a> {
             }
             Stmt::While { cond, body } => {
                 let cond_ty = self.check_expr(cond)?;
-                if cond_ty != Type::Bool {
+                // `void` means an earlier error or an unknown type — don't pile on.
+                if cond_ty != Type::Bool && cond_ty != Type::Void {
+                    self.report_condition(cond, &cond_ty);
                     return Err(CheckerError::TypeError(Type::Bool, cond_ty));
                 }
                 self.env.push_scope();
@@ -348,11 +415,13 @@ impl<'a> Checker<'a> {
                     Type::Int | Type::I64 | Type::I32 | Type::I16 | Type::I8
                         | Type::U64 | Type::U32 | Type::U16 | Type::U8
                 );
-                if !is_int(&start_ty) {
-                    return Err(CheckerError::TypeError(Type::Int, start_ty));
-                }
-                if !is_int(&end_ty) {
-                    return Err(CheckerError::TypeError(Type::Int, end_ty));
+                for (bound, ty) in [(start, &start_ty), (end, &end_ty)] {
+                    if !is_int(ty) {
+                        self.report(&bound.span, "range bound is not an integer", format!(
+                            "`for` ranges need integer bounds; this is `{}`", ty
+                        ));
+                        return Err(CheckerError::TypeError(Type::Int, ty.clone()));
+                    }
                 }
                 self.env.push_scope();
                 self.env.define(var.node, Type::Int);
@@ -387,10 +456,8 @@ impl<'a> Checker<'a> {
                         return Ok(());
                     }
                     other => {
-                        report_error(
-                            &expr.span.file, self.src, &expr.span,
-                            "match on a non-enum value",
-                            &format!("`match` needs an enum value; found `{:?}`", other),
+                        self.report(&expr.span, "match on a non-enum value",
+                            &format!("`match` needs an enum value; found `{}`", other),
                         );
                         return Err(CheckerError::GenericError(
                             "`match` scrutinee is not an enum".to_string(),
@@ -411,9 +478,7 @@ impl<'a> Checker<'a> {
                     let Some((_, payload)) = variants.iter()
                         .find(|(v, _)| v == arm.variant.node)
                     else {
-                        report_error(
-                            &arm.variant.span.file, self.src, &arm.variant.span,
-                            "unknown enum variant",
+                        self.report(&arm.variant.span, "unknown enum variant",
                             &format!("`{}` is not a variant of `{}`", arm.variant.node, enum_name),
                         );
                         return Err(CheckerError::GenericError(format!(
@@ -421,9 +486,7 @@ impl<'a> Checker<'a> {
                         )));
                     };
                     if arm.binds.len() != payload.len() {
-                        report_error(
-                            &arm.variant.span.file, self.src, &arm.variant.span,
-                            "wrong number of bindings",
+                        self.report(&arm.variant.span, "wrong number of bindings",
                             &format!(
                                 "`{}.{}` carries {} value(s); the arm binds {}",
                                 enum_name, arm.variant.node, payload.len(), arm.binds.len()
@@ -448,9 +511,7 @@ impl<'a> Checker<'a> {
                         .map(|(v, _)| v.as_str())
                         .collect();
                     if !missing.is_empty() {
-                        report_error(
-                            &expr.span.file, self.src, &expr.span,
-                            "non-exhaustive match",
+                        self.report(&expr.span, "non-exhaustive match",
                             &format!(
                                 "missing variant(s): {} — add the arm(s) or a `_ =>` catch-all",
                                 missing.join(", ")
@@ -473,14 +534,17 @@ impl<'a> Checker<'a> {
                     (BindPattern::Err, Type::Try(_)) => Type::Str, // error is always str
                     (_, Type::Void) => Type::Void,                 // cascade
                     _ => {
+                        let pattern_name = match pattern {
+                            BindPattern::Some => "Some",
+                            BindPattern::Ok => "Ok",
+                            BindPattern::Err => "Err",
+                        };
                         let (need, want) = match pattern {
                             BindPattern::Some => ("an optional (`T?`)", Type::Nullable(Box::new(Type::Void))),
                             _ => ("a fallible result (`T!`)", Type::Try(Box::new(Type::Void))),
                         };
-                        report_error(
-                            &expr.span.file, self.src, &expr.span,
-                            "wrong pattern scrutinee",
-                            &format!("`if {:?}(..) = ..` needs {}; found `{:?}`", pattern, need, scrutinee),
+                        self.report(&expr.span, "wrong pattern scrutinee",
+                            &format!("`if {}(..) = ..` needs {}; found `{}`", pattern_name, need, scrutinee),
                         );
                         return Err(CheckerError::TypeError(want, scrutinee));
                     }
@@ -509,10 +573,8 @@ impl<'a> Checker<'a> {
                     Type::Try(i) => *i,
                     Type::Void => Type::Void, // cascade
                     other => {
-                        report_error(
-                            &rhs.span.file, self.src, &rhs.span,
-                            "`?=` needs a fallible result",
-                            &format!("right side of `?=` must be a `T!` value; found `{:?}`", other),
+                        self.report(&rhs.span, "`?=` needs a fallible result",
+                            &format!("right side of `?=` must be a `T!` value; found `{}`", other),
                         );
                         return Err(CheckerError::TypeError(
                             Type::Try(Box::new(Type::Void)),
@@ -524,9 +586,7 @@ impl<'a> Checker<'a> {
                 match self.env.get_return() {
                     Some(Type::Try(_)) => {}
                     _ => {
-                        report_error(
-                            &rhs.span.file, self.src, &rhs.span,
-                            "`?=` outside a fallible fn",
+                        self.report(&rhs.span, "`?=` outside a fallible fn",
                             "`?=` propagates `Err`, so the enclosing function must return a `T!`",
                         );
                         return Err(CheckerError::GenericError(
@@ -540,7 +600,8 @@ impl<'a> Checker<'a> {
             Stmt::Return { value, cond } => {
                 if let Some(cond_expr) = cond {
                     let cond_ty = self.check_expr(cond_expr)?;
-                    if cond_ty != Type::Bool {
+                    if cond_ty != Type::Bool && cond_ty != Type::Void {
+                        self.report_condition(cond_expr, &cond_ty);
                         return Err(CheckerError::TypeError(Type::Bool, cond_ty));
                     }
                 }
@@ -558,6 +619,24 @@ impl<'a> Checker<'a> {
                     None => Err(CheckerError::ReturnOutsideFn),
                     Some(expected) => {
                         if !Self::type_compatible(&expected, &return_ty) {
+                            let span = value.as_ref().map_or(&stmt.span, |v| &v.span);
+                            let label = match (&expected, value) {
+                                (Type::Void, _) => format!(
+                                    "this function has no return type, but this returns `{}`",
+                                    return_ty
+                                ),
+                                (_, None) => format!(
+                                    "this function returns `{}`, but `return` has no value",
+                                    expected
+                                ),
+                                _ => format!(
+                                    "this function returns `{}`, but this value is `{}`",
+                                    expected, return_ty
+                                ),
+                            };
+                            let help = matches!(expected, Type::Void)
+                                .then_some("declare the return type after the arguments, e.g. `fn name() -> int`");
+                            self.report_help(span, "wrong return type", label, help);
                             Err(CheckerError::TypeError(expected, return_ty))
                         } else {
                             Ok(())
@@ -672,28 +751,19 @@ impl<'a> Checker<'a> {
 
                 // Validate that all interface methods are implemented
                 for iface in is_ {
-                    if let Some(iface_methods) = self.interfaces.get(iface.node) {
-                        for im in iface_methods {
-                            if let Some(ci) = self.classes.get(class_name) {
-                                if !ci.methods.contains_key(&im.name) {
-                                    report_error(
-                                        &iface.span.file,
-                                        self.src,
-                                        &iface.span,
-                                        "interface not implemented",
-                                        &format!(
-                                            "`{}` requires `{}` but `{}` does not define it",
-                                            iface.node, im.name, class_name
-                                        ),
-                                    );
-                                    return Err(CheckerError::MissingInterfaceMethod {
-                                        class: class_name.to_string(),
-                                        interface: iface.node.to_string(),
-                                        method: im.name.clone(),
-                                    });
-                                }
-                            }
-                        }
+                    let missing = self.interfaces.get(iface.node).and_then(|iface_methods| {
+                        let ci = self.classes.get(class_name)?;
+                        iface_methods.iter().find(|im| !ci.methods.contains_key(&im.name))
+                    });
+                    if let Some(im) = missing {
+                        let err = CheckerError::MissingInterfaceMethod {
+                            class: class_name.to_string(),
+                            interface: iface.node.to_string(),
+                            method: im.name.clone(),
+                        };
+                        // Point at the interface name in the `is` clause, not the whole class.
+                        self.pending = Some(err.to_diagnostic(iface.span.start..iface.span.end));
+                        return Err(err);
                     }
                 }
                 Ok(())
@@ -793,6 +863,16 @@ impl<'a> Checker<'a> {
     }
 
     fn check_expr(&mut self, expr: &Spanned<Expr<'a>>) -> Result<Type, CheckerError<'a>> {
+        let res = self.check_expr_inner(expr);
+        if let Err(e) = &res {
+            if self.pending.is_none() {
+                self.pending = Some(e.to_diagnostic(expr.span.start..expr.span.end));
+            }
+        }
+        res
+    }
+
+    fn check_expr_inner(&mut self, expr: &Spanned<Expr<'a>>) -> Result<Type, CheckerError<'a>> {
         match &expr.node {
             Expr::Int(_) => Ok(Type::Int),
             Expr::Float(_) => Ok(Type::Float),
@@ -802,7 +882,7 @@ impl<'a> Checker<'a> {
                 let lhs_ty = self.check_expr(left)?;
                 let rhs_ty = self.check_expr(right)?;
 
-                // suprimir cascata de erros anteriores
+                // suppress cascading errors from an earlier failure
                 if lhs_ty == Type::Void || rhs_ty == Type::Void {
                     return Ok(Type::Void);
                 }
@@ -810,12 +890,15 @@ impl<'a> Checker<'a> {
                 if lhs_ty != rhs_ty {
                     // mixing any integer widths (U8, U16, …, Int) is allowed
                     if !(lhs_ty.is_integer() && rhs_ty.is_integer()) {
-                        report_error(
-                            &expr.span.file,
-                            self.src,
-                            &expr.span,
-                            "incompatible types",
-                            &format!("expected `{:?}`, found `{:?}`", lhs_ty, rhs_ty),
+                        let help = (matches!(op, BinOp::Add)
+                            && (lhs_ty == Type::Str || rhs_ty == Type::Str))
+                            .then_some("convert the other side to `str` first, e.g. `\"count: \" + n.to_str()` for integers");
+                        self.report_help(&expr.span, "mismatched types",
+                            format!(
+                                "`{}` needs both sides to have the same type, but the left side is `{}` and the right side is `{}`",
+                                op, lhs_ty, rhs_ty
+                            ),
+                            help,
                         );
                         return Err(CheckerError::TypeError(lhs_ty, rhs_ty));
                     }
@@ -862,14 +945,9 @@ impl<'a> Checker<'a> {
                 if let Some(state) = self.env.get_ownership(name) {
                     if let OwnershipState::Moved { to } = state {
                         let moved_to = to.clone();
-                        report_error(
-                            &expr.span.file,
-                            self.src,
-                            &expr.span,
-                            "use after move",
-                            &format!("`{}` was moved to `{}`", name, moved_to),
-                        );
-                        return Err(CheckerError::UseAfterMove { var: name, moved_to });
+                        let err = CheckerError::UseAfterMove { var: name, moved_to };
+                        self.report_help(&expr.span, "use of moved value", err.to_string(), err.help());
+                        return Err(err);
                     }
                 }
                 if let Some(t) = self.env.get(name).cloned() {
@@ -879,22 +957,15 @@ impl<'a> Checker<'a> {
                 if let Some(sig) = self.fn_sigs.get(*name) {
                     return Ok(sig.clone());
                 }
-                report_error(
-                    &expr.span.file,
-                    self.src,
-                    &expr.span,
-                    "undeclared variable",
-                    &format!("`{}` is not declared in this scope", name),
-                );
-                Err(CheckerError::NameError(name))
+                let err = CheckerError::NameError(name);
+                self.report_help(&expr.span, "undeclared variable", err.to_string(), err.help());
+                Err(err)
             }
             Expr::Await(inner) => {
                 // `.await` is only valid inside an async fn or a spawn block (a
                 // coroutine). At top level use `spawn { ... }` to launch async work.
                 if !self.in_async_ctx {
-                    report_error(
-                        &inner.span.file, self.src, &inner.span,
-                        "await outside async context",
+                    self.report(&inner.span, "await outside async context",
                         "`.await` is only allowed inside an `async fn` or a `spawn { }` block; at top level launch async work with `spawn { ... }`",
                     );
                     return Err(CheckerError::GenericError(
@@ -908,9 +979,7 @@ impl<'a> Checker<'a> {
                     let is_known = self.fns.contains_key(*fname)
                         || self.module_private_fns.contains(*fname);
                     if is_known && !self.async_fns.contains(*fname) {
-                        report_error(
-                            &inner.span.file, self.src, &inner.span,
-                            "await on non-async function",
+                        self.report(&inner.span, "await on non-async function",
                             &format!(
                                 "`{}` is not declared `async fn`; `.await` requires an async function (call it directly or mark it `async fn`)",
                                 fname
@@ -931,10 +1000,8 @@ impl<'a> Checker<'a> {
                     for arg in args {
                         let ty = self.check_expr(arg)?;
                         if ty != Type::Void && !ty.is_integer() {
-                            report_error(
-                                &arg.span.file, self.src, &arg.span,
-                                "invalid constructor argument",
-                                &format!("capacity must be an integer, found `{:?}`", ty),
+                            self.report(&arg.span, "invalid constructor argument",
+                                &format!("capacity must be an integer, found `{}`", ty),
                             );
                             return Err(CheckerError::TypeError(Type::Int, ty));
                         }
@@ -975,13 +1042,13 @@ impl<'a> Checker<'a> {
                     if self.module_private_fns.contains(*name) {
                         return Err(CheckerError::PrivateAccess {
                             name: name.to_string(),
-                            module: "módulo importado".to_string(),
+                            module: "the module that defines it".to_string(),
                         });
                     }
                     if let Some(ret) = self.fns.get(*name) {
                         return Ok(ret.clone());
                     }
-                    Ok(Type::Int) // TODO: resolução de fn local
+                    Ok(Type::Int) // TODO: resolve local fn return type
                 }
             },
             Expr::Array(items) => {
@@ -993,10 +1060,8 @@ impl<'a> Checker<'a> {
                 for item in &items[1..] {
                     let ty = self.check_expr(item)?;
                     if ty != inner && !(ty.is_integer() && inner.is_integer()) {
-                        report_error(
-                            &item.span.file, self.src, &item.span,
-                            "inconsistent type in array literal",
-                            &format!("expected `{:?}`, found `{:?}`", inner, ty),
+                        self.report(&item.span, "mixed types in array literal",
+                            &format!("the first element is `{}`, so every element must be `{}`; this one is `{}`", inner, inner, ty),
                         );
                         return Err(CheckerError::TypeError(inner, ty));
                     }
@@ -1022,13 +1087,11 @@ impl<'a> Checker<'a> {
                         }
                         _ => {}
                     }
-                    // Enum variant construction with payload: `Forma.Circulo(2.0)`
+                    // Enum variant construction with payload: `Shape.Circle(2.0)`
                     if let Some(variants) = self.enums.get(*type_name).cloned() {
                         let Some((_, payload)) = variants.iter().find(|(v, _)| v == method)
                         else {
-                            report_error(
-                                &expr.span.file, self.src, &expr.span,
-                                "unknown enum variant",
+                            self.report(&expr.span, "unknown enum variant",
                                 &format!("`{}` is not a variant of `{}`", method, type_name),
                             );
                             return Err(CheckerError::GenericError(format!(
@@ -1036,9 +1099,7 @@ impl<'a> Checker<'a> {
                             )));
                         };
                         if args.len() != payload.len() {
-                            report_error(
-                                &expr.span.file, self.src, &expr.span,
-                                "wrong number of payload values",
+                            self.report(&expr.span, "wrong number of payload values",
                                 &format!(
                                     "`{}.{}` takes {} value(s); {} given",
                                     type_name, method, payload.len(), args.len()
@@ -1051,10 +1112,8 @@ impl<'a> Checker<'a> {
                         for (arg, pty) in args.iter().zip(payload.iter()) {
                             let got = self.check_expr(arg)?;
                             if !Self::type_compatible(pty, &got) {
-                                report_error(
-                                    &arg.span.file, self.src, &arg.span,
-                                    "wrong payload type",
-                                    &format!("expected `{:?}`, found `{:?}`", pty, got),
+                                self.report(&arg.span, "wrong payload type",
+                                    &format!("`{}.{}` expects a `{}` here, found `{}`", type_name, method, pty, got),
                                 );
                                 return Err(CheckerError::TypeError(pty.clone(), got));
                             }
@@ -1094,10 +1153,8 @@ impl<'a> Checker<'a> {
                                 if got != Type::Void && got != **inner
                                     && !(got.is_integer() && inner.is_integer())
                                 {
-                                    report_error(
-                                        &val.span.file, self.src, &val.span,
-                                        "wrong type for push",
-                                        &format!("expected `{:?}`, found `{:?}`", inner, got),
+                                    self.report(&val.span, "wrong element type",
+                                        &format!("this collection holds `{}`, but this value is `{}`", inner, got),
                                     );
                                     return Err(CheckerError::TypeError(*inner.clone(), got));
                                 }
@@ -1119,10 +1176,8 @@ impl<'a> Checker<'a> {
                                 if got != Type::Void && got != **key_ty
                                     && !(got.is_integer() && key_ty.is_integer())
                                 {
-                                    report_error(
-                                        &k.span.file, self.src, &k.span,
-                                        "wrong map key type",
-                                        &format!("expected `{:?}`, found `{:?}`", key_ty, got),
+                                    self.report(&k.span, "wrong map key type",
+                                        &format!("this map's keys are `{}`, but this key is `{}`", key_ty, got),
                                     );
                                     return Err(CheckerError::TypeError(*key_ty.clone(), got));
                                 }
@@ -1132,10 +1187,8 @@ impl<'a> Checker<'a> {
                                 if got != Type::Void && got != **val_ty
                                     && !(got.is_integer() && val_ty.is_integer())
                                 {
-                                    report_error(
-                                        &v.span.file, self.src, &v.span,
-                                        "wrong map value type",
-                                        &format!("expected `{:?}`, found `{:?}`", val_ty, got),
+                                    self.report(&v.span, "wrong map value type",
+                                        &format!("this map's values are `{}`, but this value is `{}`", val_ty, got),
                                     );
                                     return Err(CheckerError::TypeError(*val_ty.clone(), got));
                                 }
@@ -1149,10 +1202,8 @@ impl<'a> Checker<'a> {
                                 if got != Type::Void && got != **key_ty
                                     && !(got.is_integer() && key_ty.is_integer())
                                 {
-                                    report_error(
-                                        &k.span.file, self.src, &k.span,
-                                        "wrong map key type",
-                                        &format!("expected `{:?}`, found `{:?}`", key_ty, got),
+                                    self.report(&k.span, "wrong map key type",
+                                        &format!("this map's keys are `{}`, but this key is `{}`", key_ty, got),
                                     );
                                     return Err(CheckerError::TypeError(*key_ty.clone(), got));
                                 }
@@ -1168,10 +1219,8 @@ impl<'a> Checker<'a> {
                             if let Some(i) = args.first() {
                                 let got = self.check_expr(i)?;
                                 if got != Type::Void && !got.is_integer() {
-                                    report_error(
-                                        &i.span.file, self.src, &i.span,
-                                        "wrong index type",
-                                        &format!("`keys_at` takes an integer index; found `{:?}`", got),
+                                    self.report(&i.span, "wrong index type",
+                                        &format!("`keys_at` takes an integer index; found `{}`", got),
                                     );
                                     return Err(CheckerError::TypeError(Type::Int, got));
                                 }
@@ -1190,10 +1239,8 @@ impl<'a> Checker<'a> {
                                 if got != Type::Void && got != **inner
                                     && !(got.is_integer() && inner.is_integer())
                                 {
-                                    report_error(
-                                        &val.span.file, self.src, &val.span,
-                                        "wrong type for set",
-                                        &format!("expected `{:?}`, found `{:?}`", inner, got),
+                                    self.report(&val.span, "wrong element type",
+                                        &format!("this set holds `{}`, but this value is `{}`", inner, got),
                                     );
                                     return Err(CheckerError::TypeError(*inner.clone(), got));
                                 }
@@ -1300,7 +1347,7 @@ impl<'a> Checker<'a> {
 
             // ── Class / OOP expressions ───────────────────────────────────────
             Expr::FieldAccess(obj, field) => {
-                // Unit enum variant: `Forma.Ponto`
+                // Unit enum variant: `Shape.Point`
                 if let Expr::Var(type_name) = &obj.node {
                     if let Some(variants) = self.enums.get(*type_name) {
                         return match variants.iter().find(|(v, _)| v == field) {
@@ -1308,9 +1355,7 @@ impl<'a> Checker<'a> {
                                 Ok(Type::Named(type_name.to_string()))
                             }
                             Some(_) => {
-                                report_error(
-                                    &expr.span.file, self.src, &expr.span,
-                                    "variant needs payload",
+                                self.report(&expr.span, "variant needs payload",
                                     &format!("`{}.{}` carries values — construct it with `(...)`", type_name, field),
                                 );
                                 Err(CheckerError::GenericError(format!(
@@ -1318,9 +1363,7 @@ impl<'a> Checker<'a> {
                                 )))
                             }
                             None => {
-                                report_error(
-                                    &expr.span.file, self.src, &expr.span,
-                                    "unknown enum variant",
+                                self.report(&expr.span, "unknown enum variant",
                                     &format!("`{}` is not a variant of `{}`", field, type_name),
                                 );
                                 Err(CheckerError::GenericError(format!(
@@ -1409,10 +1452,8 @@ impl<'a> Checker<'a> {
             Expr::Err(inner) => {
                 let t = self.check_expr(inner)?;
                 if t != Type::Void && t != Type::Str {
-                    report_error(
-                        &inner.span.file, self.src, &inner.span,
-                        "error must be a string",
-                        &format!("`Err(..)` takes a `str` message; found `{:?}`", t),
+                    self.report(&inner.span, "error must be a string",
+                        &format!("`Err(..)` takes a `str` message; found `{}`", t),
                     );
                     return Err(CheckerError::TypeError(Type::Str, t));
                 }

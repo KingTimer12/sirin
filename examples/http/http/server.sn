@@ -3,7 +3,7 @@ use sirin.async
 use types
 use transport
 
-// ── handler e servidor ──────────────────────────────────────────────────────────
+// ── handler and server ──────────────────────────────────────────────────────────
 
 async fn handle_conn(conn: TcpStream, handler: fn(Request) -> Response) {
     if Ok(req) = read_request(conn) {

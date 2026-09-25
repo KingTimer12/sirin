@@ -66,7 +66,7 @@ module.exports = grammar({
     // half-typed brace only breaks the block being edited.
     block: $ => seq('{', repeat($._item), '}'),
 
-    // `fn soma`, `class Animal`, `enum Color`, `interface Shape`, `impl X`, `use mod`
+    // `fn sum`, `class Animal`, `enum Color`, `interface Shape`, `impl X`, `use mod`
     // prec(1): `fn` followed by a name is a definition, not a bare keyword.
     definition: $ => prec(1, seq(
       field('kind', alias(
@@ -79,7 +79,7 @@ module.exports = grammar({
     // `foo(` — the callee, not the whole call expression.
     call: $ => prec(1, seq(field('name', $.identifier), '(')),
 
-    // `.push`, `.nome`
+    // `.push`, `.name`
     field: $ => prec(1, seq('.', field('name', $.identifier))),
 
     keyword: _ => choice(...KEYWORDS),

@@ -9,7 +9,9 @@ use crate::{error::LexingError, span::SpannedToken};
 #[logos(skip("//[^\n]*", allow_greedy = true))]
 #[logos(skip r"/\*([^*]|\*+[^*/])*\*+/")]
 pub enum Tokens<'a> {
-    #[regex(r"[ \t\n]+")]
+    // `\r` so CRLF (Windows) files lex like LF ones; U+FEFF is the byte-order
+    // mark some editors put at the start of UTF-8 files.
+    #[regex(r"[ \t\r\n\u{FEFF}]+")]
     Whitespace,
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice())]
     Ident(&'a str),
@@ -238,5 +240,99 @@ impl<'a> Tokens<'a> {
         }
 
         tokens
+    }
+}
+
+/// Renders a token the way a user would write it, for error messages
+/// (`expected `)`, found `fn``).
+impl std::fmt::Display for Tokens<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Tokens::Whitespace => return write!(f, "whitespace"),
+            Tokens::Ident(name) => return write!(f, "identifier `{name}`"),
+            Tokens::Boolean(b) => return write!(f, "`{b}`"),
+            Tokens::Integer(n) => return write!(f, "integer `{n}`"),
+            Tokens::Float(n) => return write!(f, "float `{n}`"),
+            Tokens::Str(s) => return write!(f, "string \"{s}\""),
+            Tokens::Comma => ",",
+            Tokens::Assign => "=",
+            Tokens::Return => "return",
+            Tokens::If => "if",
+            Tokens::Else => "else",
+            Tokens::While => "while",
+            Tokens::For => "for",
+            Tokens::In => "in",
+            Tokens::Break => "break",
+            Tokens::Continue => "continue",
+            Tokens::Enum => "enum",
+            Tokens::Match => "match",
+            Tokens::And => "and",
+            Tokens::Or => "or",
+            Tokens::Not => "!",
+            Tokens::Some => "Some",
+            Tokens::None => "None",
+            Tokens::Question => "?",
+            Tokens::Ok => "Ok",
+            Tokens::Err => "Err",
+            Tokens::Try => "try",
+            Tokens::QuestionAssign => "?=",
+            Tokens::ColonColon => "::",
+            Tokens::Eq => "==",
+            Tokens::NotEq => "!=",
+            Tokens::GtEq => ">=",
+            Tokens::LtEq => "<=",
+            Tokens::Gt => ">",
+            Tokens::Lt => "<",
+            Tokens::Plus => "+",
+            Tokens::Minus => "-",
+            Tokens::Multiply => "*",
+            Tokens::Divide => "/",
+            Tokens::Class => "class",
+            Tokens::Abstract => "abstract",
+            Tokens::Extends => "extends",
+            Tokens::Implements => "implements",
+            Tokens::Interface => "interface",
+            Tokens::Impl => "impl",
+            Tokens::Is => "is",
+            Tokens::Init => "init",
+            Tokens::Default => "default",
+            Tokens::Mut => "mut",
+            Tokens::SelfKw => "self",
+            Tokens::Use => "use",
+            Tokens::TypeKw => "type",
+            Tokens::Fn => "fn",
+            Tokens::Async => "async",
+            Tokens::Spawn => "spawn",
+            Tokens::Await => "await",
+            Tokens::ColonAssign => ":=",
+            Tokens::Colon => ":",
+            Tokens::Arrow => "->",
+            Tokens::FatArrow => "=>",
+            Tokens::BlockStart => "{",
+            Tokens::BlockEnd => "}",
+            Tokens::IntType => "int",
+            Tokens::BoolType => "bool",
+            Tokens::FloatType => "float",
+            Tokens::StringType => "str",
+            Tokens::U8Type => "u8",
+            Tokens::U16Type => "u16",
+            Tokens::U32Type => "u32",
+            Tokens::U64Type => "u64",
+            Tokens::I8Type => "i8",
+            Tokens::I16Type => "i16",
+            Tokens::I32Type => "i32",
+            Tokens::I64Type => "i64",
+            Tokens::ArrayType => "Array",
+            Tokens::VecType => "Vec",
+            Tokens::MapType => "Map",
+            Tokens::SetType => "Set",
+            Tokens::DotDot => "..",
+            Tokens::Dot => ".",
+            Tokens::LParen => "(",
+            Tokens::RParen => ")",
+            Tokens::LBracket => "[",
+            Tokens::RBracket => "]",
+        };
+        write!(f, "`{text}`")
     }
 }

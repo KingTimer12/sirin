@@ -21,7 +21,7 @@ async fn write_loop(conn: TcpStream) {
 }
 
 conn = TcpStream.connect("127.0.0.1", 3000)
-println("conectado ao servidor")
+println("connected to server")
 
 spawn read_loop(conn)
 spawn write_loop(conn)

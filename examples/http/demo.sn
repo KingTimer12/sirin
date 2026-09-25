@@ -16,5 +16,5 @@ fn route(req: Request) -> Response {
 
 fn main() {
   serve("127.0.0.1", 8080, route)
-  println("ouvindo em http://127.0.0.1:8080")
+  println("listening on http://127.0.0.1:8080")
 }

@@ -110,11 +110,21 @@ mod tests {
         let mut text = Tokens::lexer("@");
         assert_eq!(
             text.next(),
-            Some(Err(LexingError::NonAsciiCharacter {
-                char: '@',
-                byte: b'@',
-            }))
+            Some(Err(LexingError::UnexpectedCharacter { char: '@' }))
         );
+    }
+
+    #[test]
+    fn test_error_unterminated_string() {
+        let mut text = Tokens::lexer("\"abc");
+        assert_eq!(text.next(), Some(Err(LexingError::UnterminatedString)));
+    }
+
+    #[test]
+    fn test_crlf_and_bom_are_whitespace() {
+        let toks: Vec<Tokens> =
+            tok_no_ws("\u{FEFF}a\r\nb").into_iter().map(|t| t.node).collect();
+        assert_eq!(toks, vec![Tokens::Ident("a"), Tokens::Ident("b")]);
     }
 
     // --- math operators ---
@@ -144,10 +154,10 @@ mod tests {
 
     #[test]
     fn test_fn_declaration() {
-        let src = "fn soma(a: int, b: int) -> int {\n  a + b\n}";
+        let src = "fn sum(a: int, b: int) -> int {\n  a + b\n}";
         let tokens = tok_no_ws(src);
         assert_eq!(tokens[0].node, Tokens::Fn);
-        assert_eq!(tokens[1].node, Tokens::Ident("soma"));
+        assert_eq!(tokens[1].node, Tokens::Ident("sum"));
         assert_eq!(tokens[2].node, Tokens::LParen);
         assert_eq!(tokens[3].node, Tokens::Ident("a"));
         assert_eq!(tokens[4].node, Tokens::Colon);
@@ -228,9 +238,9 @@ mod tests {
 
     #[test]
     fn test_fn_single_line_int() {
-        let tokens = tok_no_ws("fn dobrar(x: int) => x * 2");
+        let tokens = tok_no_ws("fn double(x: int) => x * 2");
         assert_eq!(tokens[0].node, Tokens::Fn);
-        assert_eq!(tokens[1].node, Tokens::Ident("dobrar"));
+        assert_eq!(tokens[1].node, Tokens::Ident("double"));
         assert_eq!(tokens[2].node, Tokens::LParen);
         assert_eq!(tokens[3].node, Tokens::Ident("x"));
         assert_eq!(tokens[4].node, Tokens::Colon);
@@ -244,9 +254,9 @@ mod tests {
 
     #[test]
     fn test_fn_single_line_float() {
-        let tokens = tok_no_ws("fn metade(x: float) => x / 2.0");
+        let tokens = tok_no_ws("fn half(x: float) => x / 2.0");
         assert_eq!(tokens[0].node, Tokens::Fn);
-        assert_eq!(tokens[1].node, Tokens::Ident("metade"));
+        assert_eq!(tokens[1].node, Tokens::Ident("half"));
         assert_eq!(tokens[2].node, Tokens::LParen);
         assert_eq!(tokens[3].node, Tokens::Ident("x"));
         assert_eq!(tokens[4].node, Tokens::Colon);
@@ -260,7 +270,7 @@ mod tests {
 
     #[test]
     fn test_fn_single_line_two_params() {
-        let tokens = tok_no_ws("fn soma(a: int, b: int) => a + b");
+        let tokens = tok_no_ws("fn sum(a: int, b: int) => a + b");
         assert_eq!(tokens[0].node, Tokens::Fn);
         assert_eq!(tokens[7].node, Tokens::Ident("b"));
         assert_eq!(tokens[8].node, Tokens::Colon);

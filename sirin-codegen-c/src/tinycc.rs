@@ -3,11 +3,11 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_ulong, c_void};
 
-// ── tipos opacos ─────────────────────────────────────────────────────────────
+// ── opaque types ─────────────────────────────────────────────────────────────
 
 pub enum TCCState {}
 
-// ── constantes de output type ─────────────────────────────────────────────────
+// ── output type constants ─────────────────────────────────────────────────────
 
 pub const TCC_OUTPUT_MEMORY: c_int = 1;
 pub const TCC_OUTPUT_EXE: c_int = 2;
@@ -15,7 +15,7 @@ pub const TCC_OUTPUT_DLL: c_int = 4;
 pub const TCC_OUTPUT_OBJ: c_int = 3;
 pub const TCC_OUTPUT_PREPROCESS: c_int = 5;
 
-// ── tipos de callback ─────────────────────────────────────────────────────────
+// ── callback types ────────────────────────────────────────────────────────────
 
 pub type TCCReallocFunc = unsafe extern "C" fn(ptr: *mut c_void, size: c_ulong) -> *mut c_void;
 pub type TCCErrorFunc = unsafe extern "C" fn(opaque: *mut c_void, msg: *const c_char);
@@ -60,15 +60,15 @@ unsafe extern "C" {
     pub fn tcc_list_symbols(s: *mut TCCState, ctx: *mut c_void, symbol_cb: Option<SymbolCb>);
 }
 
-// ── wrapper seguro ────────────────────────────────────────────────────────────
+// ── safe wrapper ──────────────────────────────────────────────────────────────
 
 pub struct Tcc {
     state: *mut TCCState,
-    // guarda erros capturados pelo callback
+    // holds errors captured by the callback
     errors: Box<Vec<String>>,
 }
 
-// callback que captura erros do TCC em vez de printar no stderr
+// callback that captures TCC errors instead of printing them to stderr
 unsafe extern "C" fn error_collector(opaque: *mut c_void, msg: *const c_char) {
     let errors = unsafe { &mut *(opaque as *mut Vec<String>) };
     let msg = unsafe { CStr::from_ptr(msg) }
@@ -89,7 +89,7 @@ impl Tcc {
             errors: Box::new(Vec::new()),
         };
 
-        // registra o callback de erro apontando para o Vec interno
+        // register the error callback pointing at the internal Vec
         unsafe {
             tcc_set_error_func(
                 tcc.state,
@@ -111,7 +111,7 @@ impl Tcc {
         }
     }
 
-    /// Define o tipo de saída — deve ser chamado antes de qualquer compilação
+    /// Sets the output type — must be called before any compilation
     pub fn set_output_type(&self, output_type: c_int) -> Result<(), String> {
         let r = unsafe { tcc_set_output_type(self.state, output_type) };
         if r == -1 {
@@ -121,7 +121,7 @@ impl Tcc {
         }
     }
 
-    /// Compila uma string de código C
+    /// Compiles a string of C code
     pub fn compile_string(&self, src: &str) -> Result<(), String> {
         let c = CString::new(src).unwrap();
         let r = unsafe { tcc_compile_string(self.state, c.as_ptr()) };
@@ -132,7 +132,7 @@ impl Tcc {
         }
     }
 
-    /// Adiciona um arquivo C, objeto ou biblioteca
+    /// Adds a C file, object or library
     pub fn add_file(&self, path: &str) -> Result<(), String> {
         let c = CString::new(path).unwrap();
         let r = unsafe { tcc_add_file(self.state, c.as_ptr()) };
@@ -143,7 +143,7 @@ impl Tcc {
         }
     }
 
-    /// Gera um executável em disco
+    /// Writes an executable to disk
     pub fn output_file(&self, path: &str) -> Result<(), String> {
         let c = CString::new(path).unwrap();
         let r = unsafe { tcc_output_file(self.state, c.as_ptr()) };
@@ -154,7 +154,7 @@ impl Tcc {
         }
     }
 
-    /// Adiciona um include path
+    /// Adds an include path
     pub fn add_include_path(&self, path: &str) -> Result<(), String> {
         let c = CString::new(path).unwrap();
         let r = unsafe { tcc_add_include_path(self.state, c.as_ptr()) };
@@ -165,13 +165,13 @@ impl Tcc {
         }
     }
 
-    /// Define onde estão os headers e runtime do TCC
+    /// Sets where the TCC headers and runtime live
     pub fn set_lib_path(&self, path: &str) {
         let c = CString::new(path).unwrap();
         unsafe { tcc_set_lib_path(self.state, c.as_ptr()) };
     }
 
-    /// Adiciona um diretório de busca para bibliotecas (.a / .def)
+    /// Adds a library search directory (.a / .def)
     pub fn add_library_path(&self, path: &str) -> Result<(), String> {
         let c = CString::new(path).unwrap();
         let r = unsafe { tcc_add_library_path(self.state, c.as_ptr()) };

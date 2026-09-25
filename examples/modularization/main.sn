@@ -1,7 +1,7 @@
 use sirin.io
 use math
 
-a = soma(10, 3)
+a = sum(10, 3)
 b = sub(10, 3)
 c = mul(10, 3)
 

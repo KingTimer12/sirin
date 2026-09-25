@@ -1,0 +1,27 @@
+interface Barker {
+    fn bark() -> str
+}
+
+class Animal {
+    name: str
+
+    init(n: str) {
+        name = n
+    }
+
+    fn describe() -> str => name
+}
+
+class Dog extends Animal implements Barker {
+    breed: str
+
+    init(n: str, r: str) {
+        name = n
+        breed = r
+    }
+
+    fn bark() -> str => self.name
+}
+
+a: Animal = Animal("Rex")
+c: Dog = Dog("Bolt", "Labrador")

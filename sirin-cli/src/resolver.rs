@@ -28,7 +28,7 @@ pub fn resolve(path: &[&str], from: &Path) -> Result<ModuleSource, String> {
 
     let canonical = file_path.canonicalize().map_err(|_| {
         format!(
-            "módulo '{}' não encontrado em '{}'",
+            "cannot find module `{}`: expected a file at `{}`",
             path.join("."),
             file_path.display()
         )
@@ -47,7 +47,7 @@ pub fn collect_modules(
 ) -> Result<(), String> {
     let canonical = root
         .canonicalize()
-        .map_err(|e| format!("não encontrado '{}': {}", root.display(), e))?;
+        .map_err(|e| format!("cannot find module file `{}`: {}", root.display(), e))?;
 
     if visited.contains(&canonical) {
         return Ok(());
@@ -56,11 +56,15 @@ pub fn collect_modules(
     if stack.contains(&canonical) {
         let mut cycle: Vec<String> = stack.iter().map(|p| p.display().to_string()).collect();
         cycle.push(canonical.display().to_string());
-        return Err(format!("ciclo de importação detectado: {}", cycle.join(" -> ")));
+        return Err(format!(
+            "circular import: {}\n  help: modules cannot `use` each other in a loop; \
+             move the shared code into a separate module",
+            cycle.join(" -> ")
+        ));
     }
 
     let src = std::fs::read_to_string(&canonical)
-        .map_err(|e| format!("não foi possível ler '{}': {}", canonical.display(), e))?;
+        .map_err(|e| format!("cannot read module `{}`: {}", canonical.display(), e))?;
 
     let use_paths = extract_use_paths(&src);
 
@@ -139,7 +143,7 @@ mod tests {
     fn test_resolve_local() {
         let dir = tmp_dir();
         let math = dir.join("math.sn");
-        fs::write(&math, "fn soma(a: int, b: int) -> int => a + b\n").unwrap();
+        fs::write(&math, "fn sum(a: int, b: int) -> int => a + b\n").unwrap();
         let from = dir.join("main.sn");
         fs::write(&from, "").unwrap();
 
@@ -154,8 +158,8 @@ mod tests {
         let from = dir.join("main.sn");
         fs::write(&from, "").unwrap();
 
-        let err = resolve(&["naoexiste"], &from).unwrap_err();
-        assert!(err.contains("módulo 'naoexiste' não encontrado"), "{}", err);
+        let err = resolve(&["doesnotexist"], &from).unwrap_err();
+        assert!(err.contains("cannot find module `doesnotexist`"), "{}", err);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -163,7 +167,7 @@ mod tests {
     fn test_collect_simple() {
         let dir = tmp_dir();
         let math = dir.join("math.sn");
-        fs::write(&math, "fn soma(a: int, b: int) -> int => a + b\n").unwrap();
+        fs::write(&math, "fn sum(a: int, b: int) -> int => a + b\n").unwrap();
         let main = dir.join("main.sn");
         fs::write(&main, "use math\n").unwrap();
 
@@ -239,7 +243,7 @@ mod tests {
 
         let dep = a.canonicalize().unwrap();
         let err = collect_modules(&dep, &mut stack, &mut visited, &mut ordered).unwrap_err();
-        assert!(err.contains("ciclo"), "{}", err);
+        assert!(err.contains("circular import"), "{}", err);
         let _ = fs::remove_dir_all(&dir);
     }
 }

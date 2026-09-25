@@ -2,25 +2,25 @@ use sirin.io
 
 fn parse(s: str) -> int! {
     if (s.len() == 0) {
-        return Err("vazio")
+        return Err("empty")
     }
     return Ok(s.to_int())
 }
 
-fn somar(a: str, b: str) -> int! {
+fn sum(a: str, b: str) -> int! {
     x ?= parse(a)
     y ?= parse(b)
     return Ok(x + y)
 }
 
 fn main() {
-    if Ok(v) = somar("2", "3") {
+    if Ok(v) = sum("2", "3") {
         println(v)
     } else {
-        println("erro no soma")
+        println("error in sum")
     }
 
-    if Err(e) = somar("", "3") {
+    if Err(e) = sum("", "3") {
         println(e)
     }
 

@@ -1,29 +1,17 @@
 use clap::ArgMatches;
-use chumsky::Parser;
-use chumsky::input::Input as _;
-use chumsky::span::SimpleSpan;
-use sirin_parser::parser::parser;
+
+use crate::diag::{parse_or_report, read_source};
 
 pub fn execute(matches: &ArgMatches) {
     let path = matches.get_one::<String>("file").unwrap();
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read `{}`: {}", path, e);
-            std::process::exit(1);
-        }
-    };
+    let src = read_source(path).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    });
 
     let tokens = sirin_parser::lex(&src);
-    let eoi = SimpleSpan::from(src.len()..src.len());
-
-    match parser().parse(tokens.as_slice().split_token_span(eoi)).into_result() {
-        Ok(ast) => println!("{:#?}", ast),
-        Err(errors) => {
-            for e in &errors {
-                eprintln!("parse error: {:?}", e);
-            }
-            std::process::exit(1);
-        }
+    match parse_or_report(path, &src, &tokens) {
+        Some(ast) => println!("{:#?}", ast),
+        None => std::process::exit(1),
     }
 }

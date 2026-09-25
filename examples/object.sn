@@ -1,0 +1,20 @@
+use sirin.io
+
+user = {
+    name: "Julius",
+    age: 24
+}
+
+println(user.name)
+println(user.age)
+
+fn age_of(u: { name: str, age: int }) -> int {
+    return u.age
+}
+
+other = {
+    name: "Aria",
+    age: 30
+}
+
+println(age_of(other))

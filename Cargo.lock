@@ -772,7 +772,7 @@ dependencies = [
 name = "sirin-lsp"
 version = "0.1.0"
 dependencies = [
- "chumsky",
+ "sirin-diagnostics",
  "sirin-lexer",
  "sirin-parser",
  "sirin-typechecker",

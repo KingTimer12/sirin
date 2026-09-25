@@ -8,4 +8,4 @@ x = arr[1]
 
 s: Set[u16] = Set()
 s.insert(5)
-tem = s.contains(5)
+has = s.contains(5)

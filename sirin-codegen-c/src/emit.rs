@@ -20,9 +20,9 @@ pub struct Emitter {
     /// type `Ok`/`Err` literals and the `?=` Err-propagation `return`.
     current_ret: Option<Type>,
     current_class: Option<String>,
-    /// constructor context: field_name → full C lhs ("self.nome" | "self.base.nome")
+    /// constructor context: field_name → full C lhs ("self.name" | "self.base.name")
     class_field_paths: HashMap<String, String>,
-    /// method context: field_name → full C access ("self->nome" | "self->base.nome")
+    /// method context: field_name → full C access ("self->name" | "self->base.name")
     method_field_paths: HashMap<String, String>,
     /// class name → ordered (field_name, field_type) — includes inherited fields
     classes: HashMap<String, Vec<(String, Type)>>,
@@ -985,7 +985,7 @@ impl Emitter {
                     return;
                 }
 
-                // TCO-hoisted heap string: declared above `inicio:`. Free the previous
+                // TCO-hoisted heap string: declared above `tco_start:`. Free the previous
                 // iteration's buffer, then reassign (no redeclaration → no leak).
                 if self.hoisted_heap_strs.contains(name.node) {
                     let value = self.emit_expr(&rhs.node);
@@ -1083,7 +1083,7 @@ impl Emitter {
 
                 // Globals are declared at file scope → assign without a type prefix.
                 // An already-declared local is re-assigned (no redeclaration → mutation
-                // sticks, e.g. `soma = soma + i` in a loop body).
+                // sticks, e.g. `sum = sum + i` in a loop body).
                 let is_global = self.globals.contains(name.node);
                 let reassign = is_global || self.is_declared(name.node);
                 let lhs = if reassign {
@@ -1200,7 +1200,7 @@ impl Emitter {
                                 .push_str(&format!("{}{} = {};\n", self.indent(), p, v));
                         }
                         self.output
-                            .push_str(&format!("{}goto inicio;\n", self.indent()));
+                            .push_str(&format!("{}goto tco_start;\n", self.indent()));
                         self.depth -= 1;
                         self.output.push_str(&format!("{}}}\n", self.indent()));
                     } else {
@@ -1209,7 +1209,7 @@ impl Emitter {
                                 .push_str(&format!("{}{} = {};\n", self.indent(), p, v));
                         }
                         self.output
-                            .push_str(&format!("{}goto inicio;\n", self.indent()));
+                            .push_str(&format!("{}goto tco_start;\n", self.indent()));
                     }
                 } else {
                     // Drop live resources/heap-strings before leaving the function.
@@ -1364,7 +1364,7 @@ impl Emitter {
                             }
                         }
                     }
-                    self.output.push_str(&format!("{}inicio:\n", self.indent()));
+                    self.output.push_str(&format!("{}tco_start:\n", self.indent()));
                     self.current_fn = Some(fn_name.to_string());
                     self.current_fn_params =
                         args.iter().map(|(pname, _)| pname.node.to_string()).collect();
@@ -2032,7 +2032,7 @@ impl Emitter {
                 }
             }
             Expr::MethodCall(obj, method, args) => {
-                // Enum variant construction with payload: `Forma.Circulo(2.0)`
+                // Enum variant construction with payload: `Shape.Circle(2.0)`
                 if let Expr::Var(ename) = &obj.node {
                     if !self.vars.contains_key(*ename) {
                         if let Some(variants) = self.enums.get(*ename) {
@@ -2249,7 +2249,7 @@ impl Emitter {
                 }
             }
             Expr::FieldAccess(obj, field) => {
-                // Unit enum variant: `Forma.Ponto`
+                // Unit enum variant: `Shape.Point`
                 if let Expr::Var(ename) = &obj.node {
                     if !self.vars.contains_key(*ename) {
                         if let Some(variants) = self.enums.get(*ename) {
@@ -3125,73 +3125,73 @@ mod tests {
 
     #[test]
     fn test_simple_class_method_pointer() {
-        let c = emit("class Animal {\n    nome: str\n    init(n: str) { nome = n }\n    fn descrever() -> str => nome\n}");
+        let c = emit("class Animal {\n    name: str\n    init(n: str) { name = n }\n    fn describe() -> str => name\n}");
         assert!(c.contains("Animal* self"), "method must take pointer self");
-        assert!(c.contains("self->nome"), "field access must use ->");
+        assert!(c.contains("self->name"), "field access must use ->");
         assert!(c.contains("Animal Animal_new("), "constructor returns by value");
     }
 
     #[test]
     fn test_inheritance_struct_has_base() {
         let c = emit(
-            "class Animal {\n    nome: str\n    init(n: str) { nome = n }\n}\nclass Cachorro extends Animal {\n    raca: str\n    init(n: str, r: str) { nome = n\nraca = r }\n}"
+            "class Animal {\n    name: str\n    init(n: str) { name = n }\n}\nclass Dog extends Animal {\n    breed: str\n    init(n: str, r: str) { name = n\nbreed = r }\n}"
         );
-        assert!(c.contains("Animal base;"), "Cachorro struct must embed Animal base");
-        assert!(c.contains("self.base.nome = n"), "inherited field assignment goes through base");
-        assert!(c.contains("self.raca = r"), "own field assignment is direct");
+        assert!(c.contains("Animal base;"), "Dog struct must embed Animal base");
+        assert!(c.contains("self.base.name = n"), "inherited field assignment goes through base");
+        assert!(c.contains("self.breed = r"), "own field assignment is direct");
     }
 
     #[test]
     fn test_method_call_takes_address() {
         let c = emit(
-            "class Animal {\n    nome: str\n    init(n: str) { nome = n }\n    fn descrever() -> str => nome\n}\na: Animal = Animal(\"Rex\")\nb: str = a.descrever()"
+            "class Animal {\n    name: str\n    init(n: str) { name = n }\n    fn describe() -> str => name\n}\na: Animal = Animal(\"Rex\")\nb: str = a.describe()"
         );
-        assert!(c.contains("Animal_descrever(&a)"), "method call on local var must pass &var");
+        assert!(c.contains("Animal_describe(&a)"), "method call on local var must pass &var");
     }
 
     #[test]
     fn test_interface_emits_comment() {
-        let c = emit("interface Corredor {\n    fn correr() -> str\n}");
-        assert!(c.contains("/* interface Corredor */"), "interface must emit a comment");
+        let c = emit("interface Runner {\n    fn run() -> str\n}");
+        assert!(c.contains("/* interface Runner */"), "interface must emit a comment");
     }
 
     #[test]
-    fn test_impl_int_dobrar_eh_par() {
+    fn test_impl_int_double_is_even() {
         let c = emit(
-            "impl int {\n    fn dobrar() -> int => self * 2\n    fn eh_par() -> bool => self == 0\n}"
+            "impl int {\n    fn double() -> int => self * 2\n    fn is_even() -> bool => self == 0\n}"
         );
-        assert!(c.contains("int64_t int_dobrar(int64_t self)"), "impl int fn must use int64_t self");
-        assert!(c.contains("int int_eh_par(int64_t self)"),     "bool return maps to int in C");
+        assert!(c.contains("int64_t int_double(int64_t self)"), "impl int fn must use int64_t self");
+        assert!(c.contains("int int_is_even(int64_t self)"),     "bool return maps to int in C");
     }
 
     #[test]
-    fn test_impl_str_vazio() {
-        let c = emit("impl str {\n    fn vazio() -> bool => self == 0\n}");
-        assert!(c.contains("int str_vazio(const char* self)"), "impl str fn must use const char* self");
+    fn test_impl_str_empty() {
+        let c = emit("impl str {\n    fn empty() -> bool => self == 0\n}");
+        assert!(c.contains("int str_empty(const char* self)"), "impl str fn must use const char* self");
     }
 
     #[test]
     fn test_impl_named_adds_method() {
         let c = emit(
-            "class Animal {\n    nome: str\n    init(n: str) { nome = n }\n}\nimpl Animal {\n    fn cumprimentar() -> str => nome\n}"
+            "class Animal {\n    name: str\n    init(n: str) { name = n }\n}\nimpl Animal {\n    fn greet() -> str => name\n}"
         );
-        assert!(c.contains("const char* Animal_cumprimentar(Animal* self)"), "impl for named type emits pointer self");
-        assert!(c.contains("self->nome"), "field access inside impl method uses ->");
+        assert!(c.contains("const char* Animal_greet(Animal* self)"), "impl for named type emits pointer self");
+        assert!(c.contains("self->name"), "field access inside impl method uses ->");
     }
 
     #[test]
     fn test_prim_method_call_routes_correctly() {
         let c = emit(
-            "impl int {\n    fn dobrar() -> int => self * 2\n}\nx: int = 5\ny: int = x.dobrar()"
+            "impl int {\n    fn double() -> int => self * 2\n}\nx: int = 5\ny: int = x.double()"
         );
-        assert!(c.contains("int_dobrar(x)"), "x.dobrar() must emit int_dobrar(x)");
+        assert!(c.contains("int_double(x)"), "x.double() must emit int_double(x)");
     }
 
     #[test]
     fn test_class_is_emits_comment() {
         let c = emit(
-            "interface Ave { fn voar() -> str }\nclass Pato implements Ave {\n    fn voar() -> str => \"bate asas\"\n}"
+            "interface Bird { fn fly() -> str }\nclass Duck implements Bird {\n    fn fly() -> str => \"flaps wings\"\n}"
         );
-        assert!(c.contains("/* Pato implements Ave */"), "implements clause must emit comment");
+        assert!(c.contains("/* Duck implements Bird */"), "implements clause must emit comment");
     }
 }

@@ -1,4 +1,4 @@
-// Tipos compartilhados do HTTP. Apelidos de struct anônimo (estruturais).
+// Shared HTTP types. Anonymous struct aliases (structural).
 
 type Request = {
     method:  str,

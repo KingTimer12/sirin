@@ -1,6 +1,6 @@
 use chumsky::{
     IterParser, Parser,
-    error::Simple,
+    error::Rich,
     extra::Err,
     input::MappedInput,
     pratt::{infix, left, prefix},
@@ -31,7 +31,7 @@ fn sp(s: SimpleSpan) -> Span {
 }
 
 pub fn parser<'a>()
--> impl Parser<'a, TokenInput<'a>, Vec<Spanned<Stmt<'a>>>, Err<Simple<'a, Tokens<'a>>>> {
+-> impl Parser<'a, TokenInput<'a>, Vec<Spanned<Stmt<'a>>>, Err<Rich<'a, Tokens<'a>>>> {
     let ident_expr = select! { Tokens::Ident(n) => Expr::Var(n) };
     let ident_name = select! { Tokens::Ident(n) => n };
     let spanned_name = ident_name
@@ -82,7 +82,7 @@ pub fn parser<'a>()
             .delimited_by(just(Tokens::LBracket), just(Tokens::RBracket))
             .boxed();
 
-        // Anonymous struct type annotation: { idade: int, nome: str }. Field types are
+        // Anonymous struct type annotation: { age: int, name: str }. Field types are
         // the full recursive `ty`, so `{ headers: Map[str, str] }` is allowed. Fields
         // kept sorted by name for structural identity (matches literal inference).
         let struct_ty = ident_name
@@ -161,6 +161,7 @@ pub fn parser<'a>()
             _ => t,
         })
     })
+    .labelled("type")
     .boxed();
 
     // Postfix ops collected per-token; stored with their span for correct tree spans
@@ -237,7 +238,7 @@ pub fn parser<'a>()
                     Spanned::new(Expr::NewFields(name, fields), sp(extra.span()))
                 });
 
-            // Anonymous object literal: { nome: "Julius", idade: 24 }
+            // Anonymous object literal: { name: "Julius", age: 24 }
             // Distinct from a code block: only reachable in expression position.
             let obj_literal = ident_name
                 .clone()
@@ -371,6 +372,7 @@ pub fn parser<'a>()
             .map_with(|_, extra| Postfix::Clone(sp(extra.span())));
 
         let primary = atom
+            .labelled("expression")
             .then(
                 postfix_index
                     .or(postfix_await)
@@ -481,7 +483,8 @@ pub fn parser<'a>()
                 )
             }),
         ))
-    });
+    })
+    .labelled("expression");
 
     let stmt = recursive(|decl| {
         // name: Type = expr
@@ -662,7 +665,7 @@ pub fn parser<'a>()
                 )
             });
 
-        // `enum Forma { Circulo(float), Retangulo(float, float), Ponto }`
+        // `enum Shape { Circle(float), Rectangle(float, float), Point }`
         let enum_variant = spanned_name
             .clone()
             .then(
@@ -1052,7 +1055,8 @@ pub fn parser<'a>()
                 .clone()
                 .map_with(|e, extra| Spanned::new(Stmt::Expr(e), sp(extra.span()))))
             .boxed()
-    });
+    })
+    .labelled("statement");
 
     stmt.repeated().collect::<Vec<_>>().then_ignore(end())
 }

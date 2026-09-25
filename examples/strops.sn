@@ -12,18 +12,18 @@ println(s.starts_with("Hello"))
 println(s.ends_with("World"))
 println(s.replace("World", "Sirin"))
 
-linha = "  GET /users/1 HTTP/1.1  "
-println(linha.trim())
+line = "  GET /users/1 HTTP/1.1  "
+println(line.trim())
 
-partes = linha.trim().split(" ")
-println(partes.get(0))
-println(partes.get(1))
-println(partes.get(2))
+parts = line.trim().split(" ")
+println(parts.get(0))
+println(parts.get(1))
+println(parts.get(2))
 
 n = "42".to_int()
 println(n + 8)
 
-corpo = "{\"nome\": \"Julius\", \"idade\": 24}"
-usuario: { nome: str, idade: int } = corpo.to_object()
-println(usuario.nome)
-println(usuario.idade)
+body = "{\"name\": \"Julius\", \"age\": 24}"
+user: { name: str, age: int } = body.to_object()
+println(user.name)
+println(user.age)

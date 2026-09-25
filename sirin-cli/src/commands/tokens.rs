@@ -1,30 +1,27 @@
 use clap::ArgMatches;
 use logos::Logos;
+use sirin_diagnostics::eprint_all;
 use sirin_lexer::token::Tokens;
+
+use crate::diag::read_source;
 
 pub fn execute(matches: &ArgMatches) {
     let path = matches.get_one::<String>("file").unwrap();
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read `{}`: {}", path, e);
-            std::process::exit(1);
-        }
-    };
+    let src = read_source(path).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    });
 
-    let mut had_error = false;
     for (token, span) in Tokens::lexer(&src).spanned() {
         match token {
-            Ok(Tokens::Whitespace) => {}
+            Ok(Tokens::Whitespace) | Err(_) => {}
             Ok(tok) => println!("{:?}  {:?}", span, tok),
-            Err(e) => {
-                eprintln!("lex error at {:?}: {:?}", span, e);
-                had_error = true;
-            }
         }
     }
 
-    if had_error {
+    let errors = sirin_parser::lex_diagnostics(&src);
+    if !errors.is_empty() {
+        eprint_all(&errors, path, &src);
         std::process::exit(1);
     }
 }

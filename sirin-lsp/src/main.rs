@@ -12,16 +12,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use chumsky::Parser as _;
-use chumsky::input::Input as _;
-use chumsky::span::SimpleSpan;
 use tokio::sync::Mutex;
 use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use sirin_parser::aliases::resolve_aliases;
-use sirin_parser::parser::parser;
 use sirin_parser::span::Spanned;
 use sirin_parser::stmt::Stmt;
 use sirin_parser::types::Type;
@@ -98,7 +94,7 @@ enum DefKind {
 #[derive(Clone)]
 struct Def {
     name: String,
-    /// hover text, e.g. `fn area(f: Forma) -> float` or `raio: float`
+    /// hover text, e.g. `fn area(s: Shape) -> float` or `radius: float`
     detail: String,
     kind: DefKind,
     /// type that owns this member — `Some("Animal")`, `Some("int")` for an
@@ -176,7 +172,7 @@ fn collect_stmt_defs(
             let inferred = ty.clone().or_else(|| rough_expr_type(&rhs.node));
             let detail = match &inferred {
                 Some(t) => format!("{}: {}", name.node, type_str(t)),
-                None => format!("{} (inferido)", name.node),
+                None => format!("{} (inferred)", name.node),
             };
             let mut d = def(name, detail, DefKind::Var);
             d.ty = inferred;
@@ -509,22 +505,10 @@ fn analyze(text: &str, file_path: Option<&Path>) -> Analysis {
     let mut defs = Vec::new();
 
     let tokens = sirin_parser::lex(text);
-    let eoi = SimpleSpan::from(text.len()..text.len());
-    let parsed = parser().parse(tokens.as_slice().split_token_span(eoi)).into_result();
-
-    let mut stmts = match parsed {
+    let mut stmts = match sirin_parser::parse(text, &tokens) {
         Ok(s) => s,
         Err(errors) => {
-            for e in &errors {
-                let span = e.span();
-                diagnostics.push(Diagnostic {
-                    range: span_to_range(text, span.start, span.end),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    source: Some("sirin".into()),
-                    message: format!("erro de sintaxe: {:?}", e),
-                    ..Default::default()
-                });
-            }
+            diagnostics.extend(errors.iter().map(|d| to_lsp_diagnostic(text, d)));
             return Analysis { diagnostics, defs, parsed: false };
         }
     };
@@ -546,11 +530,7 @@ fn analyze(text: &str, file_path: Option<&Path>) -> Analysis {
             visited.push(mp.clone());
             let Ok(msrc) = std::fs::read_to_string(&mp) else { continue; };
             let mtokens = sirin_parser::lex(&msrc);
-            let meoi = SimpleSpan::from(msrc.len()..msrc.len());
-            let Ok(mut mstmts) = parser()
-                .parse(mtokens.as_slice().split_token_span(meoi))
-                .into_result()
-            else { continue; };
+            let Ok(mut mstmts) = sirin_parser::parse(&msrc, &mtokens) else { continue; };
             resolve_aliases(&mut mstmts, &mut alias_map);
             checker.import_module(&mstmts);
             collect_defs(&mstmts, Some(&mp), None, &mut defs);
@@ -568,18 +548,23 @@ fn analyze(text: &str, file_path: Option<&Path>) -> Analysis {
 
     for s in &stmts {
         if let Err(e) = checker.check_stmt(s) {
-            diagnostics.push(Diagnostic {
-                range: span_to_range(text, s.span.start, s.span.end),
-                severity: Some(DiagnosticSeverity::ERROR),
-                source: Some("sirin".into()),
-                message: format!("erro de tipo: {:?}", e),
-                ..Default::default()
-            });
+            let d = checker.take_diagnostic(&e, &s.span);
+            diagnostics.push(to_lsp_diagnostic(text, &d));
         }
     }
 
     collect_defs(&stmts, None, None, &mut defs);
     Analysis { diagnostics, defs, parsed: true }
+}
+
+fn to_lsp_diagnostic(text: &str, d: &sirin_diagnostics::Diagnostic) -> Diagnostic {
+    Diagnostic {
+        range: span_to_range(text, d.span.start, d.span.end),
+        severity: Some(DiagnosticSeverity::ERROR),
+        source: Some("sirin".into()),
+        message: d.message(),
+        ..Default::default()
+    }
 }
 
 /// `analyze`, but tolerant of the half-written line under the cursor.
@@ -750,7 +735,7 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "sirin-lsp pronto")
+            .log_message(MessageType::INFO, "sirin-lsp ready")
             .await;
     }
 
@@ -839,13 +824,13 @@ impl LanguageServer for Backend {
         }
 
         for k in KEYWORDS {
-            items.push(simple_item(k, CompletionItemKind::KEYWORD, "palavra-chave"));
+            items.push(simple_item(k, CompletionItemKind::KEYWORD, "keyword"));
         }
         for t in BUILTIN_TYPES {
-            items.push(simple_item(t, CompletionItemKind::CLASS, "tipo embutido"));
+            items.push(simple_item(t, CompletionItemKind::CLASS, "built-in type"));
         }
         for c in CONSTRUCTORS {
-            items.push(simple_item(c, CompletionItemKind::CONSTRUCTOR, "construtor"));
+            items.push(simple_item(c, CompletionItemKind::CONSTRUCTOR, "constructor"));
         }
 
         Ok(Some(CompletionResponse::Array(items)))
@@ -892,12 +877,12 @@ mod tests {
 
     const SRC: &str = "\
 class Animal {
-    nome: str
-    fn descrever() -> str => nome
+    name: str
+    fn describe() -> str => name
 }
 
-class Cachorro extends Animal {
-    fn latir() -> str => \"au\"
+class Dog extends Animal {
+    fn bark() -> str => \"woof\"
 }
 
 a: Animal = Animal(\"Rex\")
@@ -915,7 +900,7 @@ v: Vec[u8] = Vec(10)
 
     #[test]
     fn dot_receiver_finds_the_identifier_before_the_dot() {
-        let src = "a.no";
+        let src = "a.na";
         assert_eq!(dot_receiver(src, 4).as_deref(), Some("a"));
         assert_eq!(dot_receiver(src, 2).as_deref(), Some("a"));
         // Not a member position: no dot precedes the word.
@@ -926,12 +911,12 @@ v: Vec[u8] = Vec(10)
 
     #[test]
     fn members_include_inherited_ones() {
-        let text = format!("{}c = Cachorro(\"Bob\")\nc.", SRC);
+        let text = format!("{}c = Dog(\"Bob\")\nc.", SRC);
         let offset = text.len();
         let got = labels(&text, "c", offset);
-        assert!(got.contains(&"latir".to_string()));
-        assert!(got.contains(&"nome".to_string()), "herdado de Animal: {:?}", got);
-        assert!(got.contains(&"descrever".to_string()));
+        assert!(got.contains(&"bark".to_string()));
+        assert!(got.contains(&"name".to_string()), "inherited from Animal: {:?}", got);
+        assert!(got.contains(&"describe".to_string()));
     }
 
     #[test]
@@ -947,23 +932,23 @@ v: Vec[u8] = Vec(10)
     fn completion_survives_the_syntax_error_it_is_triggered_by() {
         let text = format!("{}a.", SRC);
         let offset = text.len();
-        assert!(!analyze(&text, None).parsed, "esperado erro de sintaxe");
+        assert!(!analyze(&text, None).parsed, "expected a syntax error");
         let got = labels(&text, "a", offset);
-        assert!(got.contains(&"nome".to_string()), "{:?}", got);
+        assert!(got.contains(&"name".to_string()), "{:?}", got);
     }
 
     #[test]
     fn self_resolves_to_the_enclosing_class() {
-        let text = "class Animal {\n    nome: str\n    fn d() -> str {\n        self.\n    }\n}\n";
+        let text = "class Animal {\n    name: str\n    fn d() -> str {\n        self.\n    }\n}\n";
         let offset = text.find("self.").unwrap() + "self.".len();
         let got = labels(text, "self", offset);
-        assert!(got.contains(&"nome".to_string()), "{:?}", got);
+        assert!(got.contains(&"name".to_string()), "{:?}", got);
     }
 
     #[test]
     fn fields_are_not_offered_without_a_receiver() {
         let defs = analyze_for_completion(SRC, None, SRC.len()).defs;
-        let field = defs.iter().find(|d| d.name == "nome").expect("campo nome");
+        let field = defs.iter().find(|d| d.name == "name").expect("field name");
         assert_eq!(field.owner.as_deref(), Some("Animal"));
     }
 }

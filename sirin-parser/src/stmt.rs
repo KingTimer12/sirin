@@ -94,7 +94,7 @@ pub enum Stmt<'a> {
     },
     Break,
     Continue,
-    // `enum Forma { Circulo(float), Retangulo(float, float), Ponto }` — sum type
+    // `enum Shape { Circle(float), Rectangle(float, float), Point }` — sum type
     // with optional positional payloads per variant.
     Enum {
         name: Spanned<&'a str>,

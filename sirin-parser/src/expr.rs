@@ -19,7 +19,7 @@ pub enum Expr<'a> {
     New(&'a str, Vec<Spanned<Expr<'a>>>),
     NewDefault(&'a str),
     NewFields(&'a str, Vec<(&'a str, Spanned<Expr<'a>>)>),
-    // anonymous object literal: { nome: "Julius", idade: 24 }
+    // anonymous object literal: { name: "Julius", age: 24 }
     ObjectLiteral(Vec<(&'a str, Spanned<Expr<'a>>)>),
     // Option constructors (replace null/undefined): `Some(v)` and `None`
     Some(Box<Spanned<Expr<'a>>>),
@@ -45,4 +45,23 @@ pub enum BinOp {
     NotEq, // !=
     And,   // and
     Or,    // or
+}
+
+impl std::fmt::Display for BinOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Gt => ">",
+            BinOp::Lt => "<",
+            BinOp::GtEq => ">=",
+            BinOp::LtEq => "<=",
+            BinOp::Eq => "==",
+            BinOp::NotEq => "!=",
+            BinOp::And => "and",
+            BinOp::Or => "or",
+        })
+    }
 }

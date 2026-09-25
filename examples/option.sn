@@ -1,6 +1,6 @@
 use sirin.io
 
-fn achar(id: int) -> str? {
+fn find(id: int) -> str? {
     if (id == 1) {
         return Some("Julius")
     }
@@ -8,28 +8,28 @@ fn achar(id: int) -> str? {
 }
 
 fn main() {
-    nome = achar(1)
-    if Some(n) = nome {
+    name = find(1)
+    if Some(n) = name {
         println(n)
     } else {
-        println("nada")
+        println("nothing")
     }
 
-    if Some(n) = achar(2) {
+    if Some(n) = find(2) {
         println(n)
     } else {
-        println("nao achou id 2")
+        println("id 2 not found")
     }
 
-    idade: int? = Some(24)
-    if Some(i) = idade {
+    age: int? = Some(24)
+    if Some(i) = age {
         println(i)
     }
 
-    vazio: int? = None
-    if Some(i) = vazio {
+    empty: int? = None
+    if Some(i) = empty {
         println(i)
     } else {
-        println("vazio")
+        println("empty")
     }
 }

@@ -1,25 +1,25 @@
 use sirin.io
 
-fn buscar(id: int) -> Try[int?] {
-    if (id < 0) { return Err("id invalido") }
+fn fetch(id: int) -> Try[int?] {
+    if (id < 0) { return Err("invalid id") }
     if (id == 0) { return Ok(None) }
     return Ok(Some(id * 10))
 }
 
 fn main() {
-    if Ok(o) = buscar(5) {
+    if Ok(o) = fetch(5) {
         if Some(v) = o {
             println(v)
         } else {
-            println("ok mas vazio")
+            println("ok but empty")
         }
     }
 
-    if Ok(o) = buscar(0) {
+    if Ok(o) = fetch(0) {
         println(o.unwrap_or(-1))
     }
 
-    if Err(e) = buscar(-1) {
+    if Err(e) = fetch(-1) {
         println(e)
     }
 

@@ -1,23 +1,23 @@
 use sirin.io
 
-fn achar(id: int) -> str? {
+fn find(id: int) -> str? {
     if (id == 1) { return Some("Julius") }
     return None
 }
 
 fn parse(s: str) -> int! {
-    if (s.len() == 0) { return Err("vazio") }
+    if (s.len() == 0) { return Err("empty") }
     return Ok(s.to_int())
 }
 
 fn main() {
-    nome = achar(1)
-    println(nome.unwrap())
+    name = find(1)
+    println(name.unwrap())
 
-    faltante = achar(2)
-    println(faltante.unwrap_or("anon"))
-    println(faltante.is_none())
-    println(nome.is_some())
+    missing = find(2)
+    println(missing.unwrap_or("anon"))
+    println(missing.is_none())
+    println(name.is_some())
 
     r = parse("42")
     println(r.unwrap())
