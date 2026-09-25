@@ -15,5 +15,5 @@ languages = ["Sirin"]
 # bump `rev` after changing grammar.js and pushing (CI checks this).
 [grammars.sirin]
 repository = "https://github.com/KingTimer12/sirin"
-rev = "7d59fc131a1461c70302f8fd5e4edd5e5ddbb42c"
+rev = "6feb63543bbd4cfadadb61f714c025096e4455c9"
 path = "editors/tree-sitter-sirin"
